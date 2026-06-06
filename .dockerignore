@@ -1,0 +1,14 @@
+# Build context is scoped to bridge/ (see docker-compose.yml). Keep runtime-only
+# files out of the image layer produced by `COPY . bridge/`.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+tests/
+Dockerfile
+.dockerignore
+*.md
