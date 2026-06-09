@@ -833,6 +833,15 @@ class ArchipelagoClient:
     # Broadcast helpers
     # ------------------------------------------------------------------
 
+    async def notify_state_changed(self) -> None:
+        """Public hook: broadcast the current state and push it to the API.
+
+        Used by the apsave reconcile loop so that checks the AP server did not
+        broadcast over the WS (e.g. local items) still reach the UI within the
+        reconcile interval, instead of waiting for the next WS-driven push.
+        """
+        await self._broadcast_state_changed()
+
     async def _broadcast_state_changed(self) -> None:
         await self._broadcast("state_changed", {
             "sessionId": self._config.session_id,
