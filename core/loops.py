@@ -124,11 +124,19 @@ async def _apsave_reconcile_loop(
     session_id: str,
     recompute_event: asyncio.Event,
     runtime: Any = None,
+    notify_state_changed: Callable[[], Awaitable[None]] | None = None,
+    interval: float = 5.0,
 ) -> None:
-    """Periodically reconcile in-memory state with the apsave (every 5s)."""
+    """Periodically reconcile in-memory state with the apsave (every 5s).
+
+    When the reconcile picks up changes that did not already arrive over the WS
+    (e.g. local-item checks the AP server does not broadcast), push the updated
+    state so the UI reflects them within the interval instead of waiting for the
+    next WS-driven push.
+    """
     log = logging.getLogger(__name__)
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(interval)
         try:
             before = {slot: (ps.checks_done, ps.items_received) for slot, ps in state._states.items()}
 
@@ -158,6 +166,8 @@ async def _apsave_reconcile_loop(
             if changed_slots:
                 log.info("apsave reconcile: state updated for slots %s", changed_slots)
                 recompute_event.set()
+                if notify_state_changed is not None:
+                    await notify_state_changed()
         except Exception as exc:
             log.warning("apsave reconcile error: %s", exc)
 

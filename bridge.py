@@ -111,7 +111,11 @@ async def _main() -> None:
         )
     )
     _reconcile_task = asyncio.create_task(
-        _apsave_reconcile_loop(state, ws_server.broadcast, config.session_id, recompute_event, runtime=runtime)
+        _apsave_reconcile_loop(
+            state, ws_server.broadcast, config.session_id, recompute_event,
+            runtime=runtime,
+            notify_state_changed=ap_client.notify_state_changed,
+        )
     )
     _heartbeat_task = asyncio.create_task(
         _ws_heartbeat_loop(ws_server.broadcast, config.session_id)
