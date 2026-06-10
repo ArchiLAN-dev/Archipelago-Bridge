@@ -15,7 +15,6 @@ from bridge.bridge import (
     StateManager,
     create_app,
 )
-from bridge.core import rest_session
 from bridge.core import rest_reachable
 
 
@@ -26,7 +25,6 @@ from bridge.core import rest_reachable
 def _config(**overrides: object) -> Config:
     defaults: dict[str, object] = {
         "internal_token": "test-token",
-        "ap_pid_file": "/tmp/test-ap.pid",
     }
     defaults.update(overrides)
     return Config(  # type: ignore[arg-type]
@@ -274,8 +272,6 @@ def test_route_parity() -> None:
         ("GET", "/data-package"),
         ("GET", "/data-package/{game}"),
         ("POST", "/commands"),
-        ("POST", "/pause"),
-        ("POST", "/resume"),
         ("POST", "/deathlink"),
         ("GET", "/slots/{slot}/hints"),
         ("POST", "/slots/{slot}/hints/request"),
@@ -291,51 +287,6 @@ def test_route_parity() -> None:
         ("GET", "/item-locations/{slot}"),
     }
     assert required.issubset(registered), f"Missing routes: {required - registered}"
-
-
-# ---------------------------------------------------------------------------
-# post_pause auth
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_post_pause_valid_token_returns_200() -> None:
-    app, _, ap_client = _make_app()
-    ap_client.ws_connected = False
-
-    with patch.object(rest_session, "_pause_flow", new=AsyncMock()):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/pause",
-                headers={"Authorization": "Bearer test-token"},
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["ok"] is True
-
-
-@pytest.mark.asyncio
-async def test_post_pause_no_auth_returns_401() -> None:
-    app, _, _ = _make_app()
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/pause")
-        assert resp.status_code == 401
-        data = resp.json()
-        assert data["error"] == "unauthorized"
-
-
-@pytest.mark.asyncio
-async def test_post_pause_wrong_token_returns_401() -> None:
-    app, _, _ = _make_app()
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/pause",
-            headers={"Authorization": "Bearer wrong-token"},
-        )
-        assert resp.status_code == 401
-        data = resp.json()
-        assert data["error"] == "unauthorized"
 
 
 # ---------------------------------------------------------------------------

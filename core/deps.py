@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import Depends, Header, HTTPException, Request
 
 from .ap_client import ArchipelagoClient
-from .coordinator import PauseResumeCoordinator
 from .state import StateManager
 
 BroadcastFn = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -20,10 +19,6 @@ def get_bridge_state(request: Request) -> StateManager:
 
 def get_ap_client(request: Request) -> ArchipelagoClient:
     return request.app.state.ap_client
-
-
-def get_coordinator(request: Request) -> PauseResumeCoordinator:
-    return request.app.state.coordinator
 
 
 def get_semaphore(request: Request) -> asyncio.Semaphore:
