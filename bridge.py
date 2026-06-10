@@ -16,7 +16,6 @@ if __package__ in {None, ""}:
 from bridge.adapters.docker_runtime import DockerRuntimeAdapter
 from bridge.core.ap_client import ArchipelagoClient, DataPackageStore
 from bridge.core.config import Config
-from bridge.core.coordinator import PauseResumeCoordinator
 from bridge.core.domain import HintInfo, PlayerState
 from bridge.core.loops import (
     _apsave_reconcile_loop,
@@ -78,14 +77,9 @@ async def _main() -> None:
 
     ws_server.bind(state, ap_client)
 
-    coordinator = PauseResumeCoordinator(
-        request_approve_restart=ws_server.request_approve_restart,
-    )
-
     reachable_semaphore = asyncio.Semaphore(1)
     app = create_app(
         state, ap_client, reachable_semaphore,
-        coordinator=coordinator,
         ws_server=ws_server,
         runtime=runtime,
     )

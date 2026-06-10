@@ -647,26 +647,6 @@ Errors: `503 ws_disconnected`
 
 ---
 
-#### `POST /pause`
-Async. Returns immediately; flow runs in background.
-```jsonc
-{ "ok": true }
-```
-
----
-
-#### `POST /resume`
-Async. Returns immediately; flow runs in background.
-```jsonc
-// Request
-{ "saveKey": "20260519T143000.apsave" }   // optional — bridge tries local save first
-
-// Response
-{ "ok": true }
-```
-
----
-
 #### `POST /deathlink`
 Broadcast a DeathLink event to the AP server. All connected players whose
 games support DeathLink will die.

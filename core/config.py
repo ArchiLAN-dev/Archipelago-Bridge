@@ -26,13 +26,9 @@ class Config:
 
     ap_admin_password: str = ""  # AP server admin password (enables !admin commands)
 
-    # Symfony central API — for bridge→API heartbeat
+    # Symfony central API - for bridge→API heartbeat
     central_api_url: str = ""
     central_api_secret: str = ""
-
-    # AP process management for pause/resume flow (subprocess runtime)
-    ap_pid_file: str = "/tmp/ap.pid"
-    ap_launch_cmd: str = ""  # resume: appends --savefile=<path>
 
     @classmethod
     def from_env(cls) -> Config:
@@ -52,6 +48,4 @@ class Config:
             ap_admin_password=os.environ.get("AP_ADMIN_PASSWORD", ""),
             central_api_url=os.environ.get("CENTRAL_API_URL", ""),
             central_api_secret=os.environ.get("CENTRAL_API_SECRET", ""),
-            ap_pid_file=os.environ.get("AP_PID_FILE", "/tmp/ap.pid"),
-            ap_launch_cmd=os.environ.get("AP_LAUNCH_CMD", ""),
         )
