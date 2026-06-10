@@ -619,6 +619,22 @@ class ArchipelagoClient:
         return 0
 
     def _track_item_send(self, packet: dict[str, Any]) -> None:
+        # Fast path: the ItemSend packet carries a structured NetworkItem
+        # (item/location/player/flags) + top-level "receiving". These are
+        # authoritative and game-agnostic, unlike parsing the human-readable
+        # "data" parts (which intermittently fails to resolve the slot for some
+        # games/message shapes, leaving checks to surface only via the apsave).
+        net_item = packet.get("item")
+        if isinstance(net_item, dict):
+            sender = int(net_item.get("player", 0) or 0)  # the finder
+            loc_id = int(net_item.get("location", 0) or 0)
+            item_id = int(net_item.get("item", 0) or 0)
+            if sender and loc_id > 0:
+                receiver = int(packet.get("receiving", sender) or sender)
+                self._apply_item_send(sender, loc_id, item_id, receiver)
+                return
+
+        # Fallback: parse the human-readable parts (e.g. ItemCheat, unusual shapes).
         data = [p for p in packet.get("data", []) if isinstance(p, dict)]
 
         sender = 0
@@ -645,16 +661,19 @@ class ArchipelagoClient:
                 found_item_id = raw_val
                 found_receiver = int(part.get("player", 0) or sender)
 
-        if found_loc_id:
-            self._state.add_location_checks(sender, [found_loc_id])
+        self._apply_item_send(sender, found_loc_id, found_item_id, found_receiver)
+
+    def _apply_item_send(self, sender: int, loc_id: int, item_id: int, receiver: int) -> None:
+        if loc_id:
+            self._state.add_location_checks(sender, [loc_id])
             ps = self._state.ensure_slot(sender)
             if ps.client_status < 20:
                 self._state.update_client_status(sender, 20)
 
-        if found_item_id and found_receiver:
-            self._state.add_item_received(found_receiver, found_item_id, sender, found_loc_id)
+        if item_id and receiver:
+            self._state.add_item_received(receiver, item_id, sender, loc_id)
 
-        if found_loc_id or (found_item_id and found_receiver):
+        if loc_id or (item_id and receiver):
             self._recompute_event.set()
 
     def _track_goal(self, packet: dict[str, Any]) -> None:
