@@ -102,6 +102,7 @@ async def _main() -> None:
             runtime=runtime,
             central_api_url=config.central_api_url,
             central_api_secret=config.central_api_secret,
+            notify_state_changed=ap_client.notify_state_changed,
         )
     )
     _reconcile_task = asyncio.create_task(

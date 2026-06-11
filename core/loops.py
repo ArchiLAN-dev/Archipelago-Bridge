@@ -69,10 +69,12 @@ async def _reachable_sweep_loop(
     runtime: Any = None,
     central_api_url: str = "",
     central_api_secret: str = "",
+    notify_state_changed: Callable[[], Awaitable[None]] | None = None,
+    initial_delay: float = 20.0,
 ) -> None:
     """Compute reachable_now for every non-goal slot on WS events or every 30s."""
     log = logging.getLogger(__name__)
-    await asyncio.sleep(20)
+    await asyncio.sleep(initial_delay)
 
     last_computed: dict[int, tuple[int, int]] = {}
 
@@ -106,10 +108,11 @@ async def _reachable_sweep_loop(
                     )
             await asyncio.sleep(0)
 
-        if changed_slots:
-            # Import here to avoid circular; slot summaries are built by ap_client
-            # We reuse _broadcast_state_changed via a lightweight slots update
-            pass  # state_changed will be broadcast by ap_client on next event
+        if changed_slots and notify_state_changed is not None:
+            # The sweep is where checks_done/reachable_now get reconciled for these
+            # slots; push the `players` topic now so the progress grid updates
+            # immediately, instead of waiting for the next WS-driven push.
+            await notify_state_changed()
 
         try:
             await asyncio.wait_for(recompute_event.wait(), timeout=30.0)
