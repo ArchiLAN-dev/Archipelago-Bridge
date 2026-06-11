@@ -901,7 +901,7 @@ class ArchipelagoClient:
     async def _broadcast_hints(self, slot: int) -> None:
         hints = self._state.get_hints(slot)
         ps = self._state._states.get(slot)
-        await self._broadcast("hints_changed", {
+        payload: dict[str, Any] = {
             "sessionId": self._config.session_id,
             "slot": slot,
             "hints": [
@@ -925,7 +925,31 @@ class ArchipelagoClient:
             "hintsUsed": ps.hints_used if ps else 0,
             "hintPointsAvailable": ps.hint_points_available if ps else 0,
             "hintCost": ps.hint_cost if ps else 0,
-        })
+        }
+        # Local WS broadcast + push to Symfony so it publishes the hints Mercure topic
+        # (runs/{id}/slots/{n}/hints) the frontend subscribes to - otherwise hints only
+        # ever update on a manual GET /hints (story 9.23 task 4).
+        await self._broadcast("hints_changed", payload)
+        await self._push_hints_to_api(slot, payload)
+
+    async def _push_hints_to_api(self, slot: int, payload: dict[str, Any]) -> None:
+        """Push a slot's hints to Symfony for the Mercure topic runs/{id}/slots/{n}/hints."""
+        url = self._config.central_api_url
+        secret = self._config.central_api_secret
+        if not url or not secret:
+            return
+        endpoint = (
+            f"{url.rstrip('/')}"
+            f"/api/v1/internal/sessions/{self._config.session_id}/slots/{slot}/hints-push"
+        )
+        headers = {"X-Internal-Secret": secret}
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(endpoint, json=payload, headers=headers)
+                if resp.status_code not in (200, 204):
+                    self._log.warning("hints push: unexpected status %d for slot %d", resp.status_code, slot)
+        except Exception as exc:
+            self._log.warning("hints push error slot %d: %s", slot, exc)
 
     # ------------------------------------------------------------------
     # Reconnect loop
