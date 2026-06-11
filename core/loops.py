@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .reachable import _compute_reachable
+from .reachable import _compute_reachable, _reachable_cache
 from .save_parser import load_save_state_from_json
 from .state import StateManager
 
@@ -94,7 +94,14 @@ async def _reachable_sweep_loop(
                 ps = state._states.get(slot_id)
                 if ps:
                     ps.reachable_now = result.get("counts", {}).get("reachable_now", 0)
-                    last_computed[slot_id] = (ps.checks_done, ps.items_received)
+                    # Mark with the snapshot the computation actually used (the cache key it
+                    # just stored), NOT the post-await current state. Otherwise checks/items
+                    # that arrived DURING the ~seconds compute get marked as computed and the
+                    # slot is never re-swept -> reachable_now stuck one batch behind.
+                    cached = _reachable_cache.get(slot_id)
+                    last_computed[slot_id] = (
+                        cached[0] if cached is not None else (ps.checks_done, ps.items_received)
+                    )
                     changed_slots.append(slot_id)
                 if not result.get("cached"):
                     await broadcast("reachable_changed", {
