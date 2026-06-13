@@ -1,12 +1,13 @@
 name: Docker Publish
 
 on:
+  # Build/publish only on master + release tags - not on PRs - to stay within the shared
+  # org Actions minutes budget. Use workflow_dispatch to build on demand.
   push:
     branches:
       - master
     tags:
       - 'v*.*.*'
-  pull_request:
   workflow_dispatch:
 
 permissions:
