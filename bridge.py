@@ -128,6 +128,8 @@ async def _main() -> None:
         _reconcile_task.cancel()
         _heartbeat_task.cancel()
         _api_heartbeat_task.cancel()
+        if runtime is not None and hasattr(runtime, "aclose"):
+            await runtime.aclose()
 
 
 if __name__ == "__main__":
