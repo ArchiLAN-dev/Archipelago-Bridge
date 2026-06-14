@@ -30,6 +30,18 @@ class HintRequest(BaseModel):
     free: bool = False
 
 
+class HintItemRequest(BaseModel):
+    itemName: str
+    free: bool = False
+
+    @field_validator("itemName")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("itemName must not be empty")
+        return v
+
+
 class HintStatusUpdateRequest(BaseModel):
     status: int
 
@@ -105,6 +117,13 @@ class HintOkResponse(BaseModel):
     ok: bool
     slot: int
     locationId: int
+    free: bool
+
+
+class HintItemOkResponse(BaseModel):
+    ok: bool
+    slot: int
+    itemName: str
     free: bool
 
 

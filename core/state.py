@@ -181,6 +181,29 @@ class StateManager:
         ps = self._states.get(slot_index)
         return list(ps._hints) if ps else []
 
+    def record_paid_hint(self, slot_index: int) -> None:
+        """Optimistically bump the paid-hint counter after AP confirmed a paid self-hint.
+
+        Safe because hint_points_available is driven by the authoritative
+        hint_points_reported captured during the self-hint, so this does NOT affect the
+        budget - it only keeps "indices demandés" (hints_used) live until the next apsave
+        reload snaps it back to AP's authoritative value. Free/admin hints must not call
+        this (they spend no player points).
+        """
+        self.ensure_slot(slot_index).hints_used += 1
+
+    def set_hints(self, slot_index: int, hints: list[HintInfo]) -> bool:
+        """Replace a slot's full hint list (authoritative data-storage snapshot).
+
+        Returns True if the list differs from the current one. Like add_hint,
+        hints_used is left untouched (it tracks the paid-hint budget separately).
+        """
+        ps = self.ensure_slot(slot_index)
+        if ps._hints == hints:
+            return False
+        ps._hints = list(hints)
+        return True
+
     def apply_saved_states(self, saved: dict[int, PlayerState]) -> None:
         """Merge a dict of saved PlayerStates into current in-memory state."""
         for slot_id, saved_ps in saved.items():

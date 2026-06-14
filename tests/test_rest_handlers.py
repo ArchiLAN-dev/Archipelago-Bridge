@@ -16,6 +16,7 @@ from bridge.bridge import (
     create_app,
 )
 from bridge.core import rest_reachable
+from bridge.core.ap_client import SelfHintOutcome
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +110,14 @@ async def test_post_command_ws_disconnected_returns_503() -> None:
 
 @pytest.mark.asyncio
 async def test_request_hint_success_free() -> None:
-    app, _, ap_client = _make_app()
+    app, state, ap_client = _make_app()
     ap_client.ws_connected = True
     ap_client.send_admin_command = AsyncMock()
     ap_client._broadcast_hints = AsyncMock()
     # Populate store so location name lookup succeeds
     ap_client._store._slot_games[1] = "TestGame"
     ap_client._store._location_names["TestGame"] = {42: "Test Location"}
+    ap_client._store._slot_aliases[1] = "TestPlayer"
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -129,7 +131,10 @@ async def test_request_hint_success_free() -> None:
         assert data["locationId"] == 42
         assert data["free"] is True
 
-    ap_client.send_admin_command.assert_awaited_once()
+    # Admin hint by location: the server resolves location → item (story 9.28)
+    ap_client.send_admin_command.assert_awaited_once_with("!admin /hint_location TestPlayer Test Location")
+    # Free/admin hints spend no player points, so the "indices demandés" counter must not move.
+    assert state.ensure_slot(1).hints_used == 0
 
 
 @pytest.mark.asyncio
@@ -149,6 +154,112 @@ async def test_request_hint_non_integer_slot_returns_422() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/hints/abc/request", json={"locationId": 42})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Paid hints via connect-as-slot (story 9.30)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_request_hint_paid_connects_as_slot() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.send_admin_command = AsyncMock()
+    ap_client.run_self_hint = AsyncMock(return_value=SelfHintOutcome(ok=True))
+    ap_client._broadcast_hints = AsyncMock()
+    ap_client._store._slot_games[1] = "TestGame"
+    ap_client._store._location_names["TestGame"] = {42: "Test Location"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/hints/1/request", json={"locationId": 42, "free": False})
+        assert resp.status_code == 200
+
+    # Paid path uses the player self-hint (charged), NOT the admin command.
+    ap_client.run_self_hint.assert_awaited_once_with(1, "!hint_location Test Location")
+    ap_client.send_admin_command.assert_not_awaited()
+    # hints_used is bumped optimistically so "indices demandés" updates live; the budget
+    # itself is driven by AP's authoritative hint_points (captured by run_self_hint).
+    assert state.ensure_slot(1).hints_used == 1
+    ap_client._broadcast_hints.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_request_hint_paid_rejected_returns_409() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.run_self_hint = AsyncMock(
+        return_value=SelfHintOutcome(ok=False, reason="rejected", message="not enough points")
+    )
+    ap_client._store._slot_games[1] = "TestGame"
+    ap_client._store._location_names["TestGame"] = {42: "Test Location"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/hints/1/request", json={"locationId": 42, "free": False})
+        assert resp.status_code == 409
+
+    assert state.ensure_slot(1).hints_used == 0  # not charged on failure
+
+
+@pytest.mark.asyncio
+async def test_request_hint_item_free_uses_admin_command() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.send_admin_command = AsyncMock()
+    ap_client.run_self_hint = AsyncMock()
+    ap_client._store._slot_aliases[1] = "TestPlayer"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/slots/1/hints/request-item", json={"itemName": "Sword", "free": True})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["itemName"] == "Sword"
+        assert data["free"] is True
+
+    ap_client.send_admin_command.assert_awaited_once_with("!admin /hint TestPlayer Sword")
+    ap_client.run_self_hint.assert_not_awaited()
+    # Free/admin item hints spend no player points: the counter stays put.
+    assert state.ensure_slot(1).hints_used == 0
+
+
+@pytest.mark.asyncio
+async def test_request_hint_item_paid_connects_as_slot() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.send_admin_command = AsyncMock()
+    ap_client.run_self_hint = AsyncMock(return_value=SelfHintOutcome(ok=True))
+    ap_client._broadcast_hints = AsyncMock()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/slots/1/hints/request-item", json={"itemName": "Boots", "free": False})
+        assert resp.status_code == 200
+
+    ap_client.run_self_hint.assert_awaited_once_with(1, "!hint Boots")
+    ap_client.send_admin_command.assert_not_awaited()
+    # Paid item hint bumps hints_used so "indices demandés" updates live (budget stays
+    # driven by AP's authoritative hint_points).
+    assert state.ensure_slot(1).hints_used == 1
+    ap_client._broadcast_hints.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_request_hint_item_empty_name_returns_422() -> None:
+    app, _, ap_client = _make_app()
+    ap_client.ws_connected = True
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/slots/1/hints/request-item", json={"itemName": "  ", "free": False})
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_request_hint_item_ws_disconnected_returns_503() -> None:
+    app, _, ap_client = _make_app()
+    ap_client.ws_connected = False
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/slots/1/hints/request-item", json={"itemName": "Sword", "free": False})
+        assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------

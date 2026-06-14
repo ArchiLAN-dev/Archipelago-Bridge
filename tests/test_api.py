@@ -104,7 +104,7 @@ async def test_post_command_valid() -> None:
     ap_client._ws.send = AsyncMock()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/commands", json={"command": "/hint Alice"})
+        resp = await client.post("/commands", json={"command": "!hint Alice"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True

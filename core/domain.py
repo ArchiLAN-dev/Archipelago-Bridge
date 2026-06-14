@@ -67,12 +67,18 @@ class PlayerState:
     hints_used: int = 0
     hint_points_per_check: int = 1
     hint_cost: int = 0  # 0 = unknown until set by apply_hint_cost_for_slot from RoomInfo WS
+    # Authoritative hint points read from AP (Connected.hint_points) via a connect-as-slot probe.
+    # None until queried; when set it overrides the local estimate (AP is the source of truth).
+    hint_points_reported: int | None = None
     _checked_locations: set[int] = field(default_factory=set, repr=False)
     _received_items: list[tuple[int, int, int]] = field(default_factory=list, repr=False)
     _hints: list[HintInfo] = field(default_factory=list, repr=False)
 
     @property
     def hint_points_available(self) -> int:
+        if self.hint_points_reported is not None:
+            return max(0, self.hint_points_reported)
+        # Fallback estimate until AP has been queried (a connect-as-slot probe fills the real value).
         return max(0, self.checks_done * self.hint_points_per_check - self.hints_used * self.hint_cost)
 
     def to_dict(self) -> dict[str, Any]:

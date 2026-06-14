@@ -9,6 +9,7 @@ import re
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -68,6 +69,38 @@ _PERMISSION_NAMES: dict[int, str] = {
 
 BroadcastFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
+# Substrings the AP server uses when a self-hint is rejected (insufficient points, unknown
+# item/location, …). Matched case-insensitively against the command's text reply so a paid
+# hint that the server refused is reported as a failure rather than silently "succeeding".
+_HINT_FAILURE_MARKERS: tuple[str, ...] = (
+    "not enough",
+    "can't afford",
+    "cannot afford",
+    "could not find",
+    "couldn't find",
+    "no such",
+    "unknown",
+    "is not a",
+    "did you mean",
+)
+
+
+@dataclass(frozen=True)
+class SelfHintOutcome:
+    """Result of a paid connect-as-slot self-hint (story 9.30).
+
+    ``reason`` is empty on success; otherwise one of ``unknown_slot`` / ``refused`` /
+    ``rejected`` / ``timeout`` / ``ws_error`` so the REST layer can map it to an HTTP code.
+    """
+
+    ok: bool
+    reason: str = ""
+    message: str = ""
+
+
+class _SlotConnectRefused(Exception):
+    """The AP server refused a connect-as-slot attempt (wrong name/password/game)."""
+
 
 class DataPackageStore:
     """Maps (game, item_id / location_id) → name, and slot_id → player alias / game / type."""
@@ -77,6 +110,9 @@ class DataPackageStore:
         self._location_names: dict[str, dict[int, str]] = {}
         self._slot_games: dict[int, str] = {}
         self._slot_aliases: dict[int, str] = {}
+        # Registered slot name (from slot_info) - distinct from the display alias.
+        # Connecting AS a slot (paid self-hint, story 9.30) requires this name, not the alias.
+        self._slot_names: dict[int, str] = {}
         self._slot_types: dict[int, str] = {}
         self._item_flags: dict[int, int] = {}
 
@@ -95,6 +131,7 @@ class DataPackageStore:
             if isinstance(info, dict):
                 slot = int(slot_str)
                 self._slot_games[slot] = str(info.get("game", ""))
+                self._slot_names[slot] = str(info.get("name", ""))
                 raw_type = info.get("type", 1)
                 self._slot_types[slot] = _SLOT_TYPE_NAMES.get(int(raw_type), "player")
 
@@ -108,6 +145,10 @@ class DataPackageStore:
 
     def resolve_player(self, slot: int) -> str:
         return self._slot_aliases.get(slot, f"Player {slot}")
+
+    def slot_name(self, slot: int) -> str:
+        """The slot's registered name (used to Connect as that slot), not its display alias."""
+        return self._slot_names.get(slot, "")
 
     def resolve_item(self, item_id: int, player_slot: int) -> str:
         game = self._slot_games.get(player_slot, "")
@@ -197,6 +238,7 @@ class ArchipelagoClient:
         self._recompute_event: asyncio.Event = recompute_event if recompute_event is not None else asyncio.Event()
         self._store = DataPackageStore()
         self._my_slot: int = 0
+        self._team: int = 0
         self._ws: Any = None
         self.ws_connected: bool = False
         self._log = logging.getLogger(__name__)
@@ -319,6 +361,151 @@ class ArchipelagoClient:
         await self._ws.send(json.dumps([packet]))
 
     # ------------------------------------------------------------------
+    # Paid self-hint via an ephemeral connection AS the target slot (story 9.30)
+    # ------------------------------------------------------------------
+
+    async def run_self_hint(self, slot: int, command: str, *, timeout: float = 15.0) -> SelfHintOutcome:
+        """Open a throwaway connection AS ``slot`` and run a paid self-hint, charging that slot.
+
+        The main bridge connection is the TextOnly "Bridge" slot, so a self-hint there resolves
+        against (and would charge) the Bridge slot. To charge slot N — exactly as if the player
+        typed ``!hint <item>`` / ``!hint_location <location>`` in their own client — we open a
+        second WebSocket, ``Connect`` as slot N using the **server (room) password** (never the
+        admin password, never ``!admin login``), send the single ``Say``, read the authoritative
+        server reply (a ``Hint`` PrintJSON = success, a text reply = rejection), then close. AP
+        allows multiple connections per slot, so this does not disturb the player's real client.
+        The created hint reaches the UI live via the data-storage path (story 9.27).
+        """
+        if not self._store.slot_name(slot) or not self._store._slot_games.get(slot, ""):
+            return SelfHintOutcome(ok=False, reason="unknown_slot",
+                                   message=f"slot {slot} has no known name/game")
+
+        try:
+            async with websockets.connect(self._config.ap_ws_url) as ws:
+                try:
+                    connected = await self._connect_as_slot(ws, slot, timeout)
+                except _SlotConnectRefused as exc:
+                    return SelfHintOutcome(ok=False, reason="refused", message=str(exc))
+                # AP reports the slot's authoritative hint points in Connected (and RoomUpdate
+                # after the hint is paid) - capture it instead of estimating locally.
+                self._store_hint_points(slot, connected)
+                await ws.send(json.dumps([{"cmd": "Say", "text": command}]))
+                return await self._await_self_hint_reply(ws, slot, timeout)
+        except asyncio.TimeoutError:
+            return SelfHintOutcome(ok=False, reason="timeout", message="no server reply")
+        except (OSError, websockets.WebSocketException) as exc:
+            return SelfHintOutcome(ok=False, reason="ws_error", message=str(exc))
+
+    async def fetch_hint_points(self, slot: int, *, timeout: float = 8.0) -> int | None:
+        """Connect AS ``slot`` and read AP's authoritative hint points (Connected.hint_points).
+
+        AP only sends hint_points for the connected slot, and the bridge's main connection is the
+        Bridge slot - so the only way to know another slot's real points is to connect as it. Used
+        by GET /hints so the panel always shows AP's value, never a local estimate. Best-effort:
+        returns None (leaving any prior value) on failure rather than raising into the request."""
+        if not self._store.slot_name(slot) or not self._store._slot_games.get(slot, ""):
+            return None
+        try:
+            async with websockets.connect(self._config.ap_ws_url) as ws:
+                connected = await self._connect_as_slot(ws, slot, timeout)
+                return self._store_hint_points(slot, connected)
+        except (asyncio.TimeoutError, _SlotConnectRefused, OSError, websockets.WebSocketException):
+            return None
+
+    async def _connect_as_slot(self, ws: Any, slot: int, timeout: float) -> dict[str, Any]:
+        """Drain RoomInfo, Connect AS ``slot`` (server password, TextOnly), return Connected.
+
+        Raises ``_SlotConnectRefused`` on ConnectionRefused, ``asyncio.TimeoutError`` on timeout."""
+        await asyncio.wait_for(ws.recv(), timeout=timeout)  # RoomInfo
+        await ws.send(json.dumps([{
+            "cmd": "Connect",
+            "name": self._store.slot_name(slot),
+            "game": self._store._slot_games.get(slot, ""),
+            "password": self._config.ap_server_password,
+            "uuid": str(uuid.uuid4()),
+            "version": {"major": 0, "minor": 6, "build": 7, "class": "Version"},
+            "tags": ["TextOnly"],
+            "items_handling": 0,
+            "slot_data": False,
+        }]))
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            for packet in json.loads(raw):
+                if not isinstance(packet, dict):
+                    continue
+                if packet.get("cmd") == "Connected":
+                    self._apply_authoritative_locations(slot, packet)
+                    return packet
+                if packet.get("cmd") == "ConnectionRefused":
+                    raise _SlotConnectRefused(f"ConnectionRefused: {packet.get('errors', [])}")
+
+    def _apply_authoritative_locations(self, slot: int, connected: dict[str, Any]) -> None:
+        """Set a slot's checks total + hint cost from AP's authoritative location set.
+
+        AP's Connected packet for the slot lists its real locations (checked + missing) - the exact
+        set the server prices hints against (hint_cost% x locations). Using it overrides the
+        spoiler/DataPackage estimate from `_slot_location_total`, which inflates the count (and thus
+        the displayed pts/hint) when the spoiler placements weren't resolved. Mirrors what
+        `_handle_connected` already does for the bridge's own slot (story 9.32)."""
+        checked = connected.get("checked_locations")
+        missing = connected.get("missing_locations")
+        if not isinstance(checked, list) or not isinstance(missing, list):
+            return
+        total = len(checked) + len(missing)
+        if total > 0:
+            self._state.set_checks_total(slot, total)
+            self._state.apply_hint_cost_for_slot(slot, total)
+
+    def _store_hint_points(self, slot: int, packet: dict[str, Any]) -> int | None:
+        """Store AP's hint_points for a slot (from Connected/RoomUpdate) as the authoritative value."""
+        pts = packet.get("hint_points")
+        if isinstance(pts, int):
+            self._state.ensure_slot(slot).hint_points_reported = pts
+            return pts
+        return None
+
+    async def _await_self_hint_reply(self, ws: Any, slot: int, timeout: float) -> SelfHintOutcome:
+        """Read packets until the hint is confirmed (Hint PrintJSON) or refused (text reply).
+
+        Also captures the post-hint hint_points from any RoomUpdate seen before the resolution."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return SelfHintOutcome(ok=False, reason="timeout", message="no hint confirmation")
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            for packet in json.loads(raw):
+                if not isinstance(packet, dict):
+                    continue
+                if packet.get("cmd") == "RoomUpdate":
+                    self._store_hint_points(slot, packet)
+                    continue
+                if packet.get("cmd") != "PrintJSON":
+                    continue
+                if packet.get("type") == "Hint" and self._hint_involves_slot(packet, slot):
+                    return SelfHintOutcome(ok=True)
+                text = self._print_json_text(packet)
+                if text and any(m in text.lower() for m in _HINT_FAILURE_MARKERS):
+                    return SelfHintOutcome(ok=False, reason="rejected", message=text)
+
+    @staticmethod
+    def _hint_involves_slot(packet: dict[str, Any], slot: int) -> bool:
+        net_item = packet.get("item", {})
+        finding = int(net_item.get("player", 0)) if isinstance(net_item, dict) else 0
+        return slot in (int(packet.get("receiving", 0)), finding)
+
+    @staticmethod
+    def _print_json_text(packet: dict[str, Any]) -> str:
+        parts = [str(p.get("text", "")) for p in packet.get("data", []) if isinstance(p, dict)]
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
     # Connection loop
     # ------------------------------------------------------------------
 
@@ -423,12 +610,7 @@ class ArchipelagoClient:
             games_loaded = list(packet.get("data", {}).get("games", {}).keys())
             self._log.info("DataPackage received - games: %s", games_loaded)
             self._resolve_all_hint_names()
-            for slot_id, game in self._store._slot_games.items():
-                if slot_id == self._my_slot:
-                    continue
-                dp_total = len(self._store._location_names.get(game, {}))
-                if dp_total > 0:
-                    self._state.apply_hint_cost_for_slot(slot_id, dp_total)
+            self._apply_location_totals()
 
         elif cmd == "Connected":
             await self._handle_connected(packet)
@@ -456,6 +638,15 @@ class ArchipelagoClient:
             if "_read_race_mode" in keys:
                 self._race_mode = bool(keys["_read_race_mode"])
                 self._log.info("race_mode: %s", self._race_mode)
+            for key, value in keys.items():
+                hint_slot = self._slot_from_hint_key(key)
+                if hint_slot is not None:
+                    await self._ingest_hint_storage(hint_slot, value)
+
+        elif cmd == "SetReply":
+            hint_slot = self._slot_from_hint_key(str(packet.get("key", "")))
+            if hint_slot is not None:
+                await self._ingest_hint_storage(hint_slot, packet.get("value"))
 
         elif cmd == "Bounced":
             await self._handle_bounced(packet)
@@ -471,6 +662,7 @@ class ArchipelagoClient:
         players: list[dict[str, Any]] = packet.get("players", [])
         slot_info: dict[str, Any] = packet.get("slot_info", {})
         self._my_slot = int(packet.get("slot", 0))
+        self._team = int(packet.get("team", 0))
         self._log.info("Connected received - slot=%d players=%d", self._my_slot, len(players))
         self._store.handle_connected(packet)
 
@@ -495,13 +687,7 @@ class ArchipelagoClient:
             if checked_locs:
                 self._state.add_location_checks(self._my_slot, checked_locs)
 
-        for slot_id, game in self._store._slot_games.items():
-            if slot_id == self._my_slot:
-                continue
-            dp_total = len(self._store._location_names.get(game, {}))
-            if dp_total > 0:
-                self._state.set_checks_total(slot_id, dp_total)
-                self._state.apply_hint_cost_for_slot(slot_id, dp_total)
+        self._apply_location_totals()
 
         for slot_id, ps in self._state.get_all().items():
             if ps.client_status == 0 and ps.checks_done > 0:
@@ -509,10 +695,19 @@ class ArchipelagoClient:
 
         if not self._placements:
             self._load_spoiler()
+        # Spoiler placements give each slot's real location count; recompute totals so
+        # checks_total and the hint cost no longer use the inflated DataPackage size.
+        self._apply_location_totals()
 
-        # Request race_mode from AP data storage (not included in RoomInfo)
+        # Request race_mode from AP data storage (not included in RoomInfo).
+        # Subscribe to every slot's hint storage so hints for ALL slots arrive live -
+        # the Hint PrintJSON is only sent to the slots involved, and the bridge connects
+        # as a single slot, so it would otherwise miss hints between other slots (story 9.27).
         if self._ws is not None:
-            await self._ws.send(json.dumps([{"cmd": "Get", "keys": ["_read_race_mode"]}]))
+            hint_keys = [self._hint_storage_key(int(s)) for s in slot_info]
+            await self._ws.send(json.dumps([{"cmd": "Get", "keys": ["_read_race_mode", *hint_keys]}]))
+            if hint_keys:
+                await self._ws.send(json.dumps([{"cmd": "SetNotify", "keys": hint_keys}]))
 
         await self._broadcast_state_changed()
 
@@ -806,6 +1001,29 @@ class ArchipelagoClient:
         """Return (item_id, receiver_slot) for a location, or None if unknown."""
         return self._placements.get(finder_slot, {}).get(location_id)
 
+    def _slot_location_total(self, slot_id: int, game: str) -> int:
+        """A slot's real location count: spoiler placements when loaded (authoritative — this is
+        the set AP uses), else the full DataPackage size as a fallback. The DataPackage lists
+        *every* location the game defines, which is far larger than the locations actually in this
+        seed, so using it inflates both checks_total and the hint cost (hint_cost% × locations)."""
+        placed = len(self._placements.get(slot_id, {}))
+        if placed > 0:
+            return placed
+        return len(self._store._location_names.get(game, {}))
+
+    def _apply_location_totals(self) -> None:
+        """Set checks_total + hint cost for every non-connected slot from its real location count.
+
+        Re-runnable: called once on Connect (DataPackage size) and again after the spoiler loads,
+        at which point the placement count replaces the inflated DataPackage size."""
+        for slot_id, game in self._store._slot_games.items():
+            if slot_id == self._my_slot:
+                continue
+            total = self._slot_location_total(slot_id, game)
+            if total > 0:
+                self._state.set_checks_total(slot_id, total)
+                self._state.apply_hint_cost_for_slot(slot_id, total)
+
     async def _track_hint(self, packet: dict[str, Any]) -> None:
         receiving_player = int(packet.get("receiving", 0))
         net_item = packet.get("item", {})
@@ -847,6 +1065,67 @@ class ArchipelagoClient:
         changed = self._state.add_hint(receiving_player, hint)
         if changed:
             await self._broadcast_hints(receiving_player)
+
+    # ------------------------------------------------------------------
+    # Hint data storage (live hints for ALL slots - story 9.27)
+    # ------------------------------------------------------------------
+
+    def _hint_storage_key(self, slot: int) -> str:
+        return f"_read_hints_{self._team}_{slot}"
+
+    def _slot_from_hint_key(self, key: str) -> int | None:
+        prefix = f"_read_hints_{self._team}_"
+        if not key.startswith(prefix):
+            return None
+        try:
+            return int(key[len(prefix):])
+        except ValueError:
+            return None
+
+    def _hint_from_storage(self, raw: dict[str, Any]) -> HintInfo | None:
+        """Build a HintInfo from a serialized AP data-storage Hint (flat fields)."""
+        receiving_player = int(raw.get("receiving_player", 0))
+        finding_player = int(raw.get("finding_player", 0))
+        item_id = int(raw.get("item", 0))
+        location_id = int(raw.get("location", 0))
+        if not (item_id and location_id and receiving_player):
+            return None
+        item_flags = int(raw.get("item_flags", 0))
+        if item_flags:
+            self._store.record_item_flags(item_id, item_flags)
+        status_raw = raw.get("status", None)
+        if status_raw is not None:
+            status = int(status_raw)
+        elif raw.get("found", False):
+            status = 40
+        else:
+            status = 0
+        return HintInfo(
+            receiving_player=receiving_player,
+            finding_player=finding_player,
+            location_id=location_id,
+            item_id=item_id,
+            entrance=str(raw.get("entrance", "")),
+            item_flags=item_flags,
+            status=status,
+            receiving_player_name=self._store.resolve_player(receiving_player),
+            finding_player_name=self._store.resolve_player(finding_player),
+            item_name=self._store.resolve_item(item_id, receiving_player),
+            location_name=self._store.resolve_location(location_id, finding_player),
+        )
+
+    async def _ingest_hint_storage(self, slot: int, raw_value: Any) -> None:
+        """Replace a slot's hints from a data-storage payload and push when changed."""
+        if not isinstance(raw_value, list):
+            return
+        hints: list[HintInfo] = []
+        for raw in raw_value:
+            if isinstance(raw, dict):
+                hint = self._hint_from_storage(raw)
+                if hint is not None:
+                    hints.append(hint)
+        if self._state.set_hints(slot, hints):
+            await self._broadcast_hints(slot)
 
     # ------------------------------------------------------------------
     # Broadcast helpers
@@ -899,6 +1178,11 @@ class ArchipelagoClient:
         })
 
     async def _broadcast_hints(self, slot: int) -> None:
+        # Resolve names before pushing: the apsave reconcile (apply_saved_states) overwrites
+        # ps._hints with save-derived hints that carry ids only (empty item/location names), so a
+        # live push would otherwise show "Item #123"/"Location #456". The GET path already calls
+        # this; doing it here is the single choke point covering every push.
+        self.resolve_slot_hint_names(slot)
         hints = self._state.get_hints(slot)
         ps = self._state._states.get(slot)
         payload: dict[str, Any] = {
