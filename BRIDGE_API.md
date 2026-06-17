@@ -7,11 +7,11 @@ Symfony, Mercure, or any specific application. Any client that speaks HTTP or
 WebSocket can use it.
 
 Three surfaces:
-- **Operator API** — prepare and operate an Archipelago session (apworld
+- **Operator API** - prepare and operate an Archipelago session (apworld
   upload, world generation, server start/stop). Admin only.
-- **WebSocket** — real-time event stream. Any number of clients can connect
+- **WebSocket** - real-time event stream. Any number of clients can connect
   simultaneously and receive the same events.
-- **Session API** — query session state and send commands (REST). Public +
+- **Session API** - query session state and send commands (REST). Public +
   admin tiers.
 
 ---
@@ -24,8 +24,8 @@ All environment variables are application-agnostic.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `SESSION_ID` | yes | — | Opaque identifier passed back in all events |
-| `INTERNAL_TOKEN` | yes | — | Bearer token for privileged REST endpoints and WS connection |
+| `SESSION_ID` | yes | - | Opaque identifier passed back in all events |
+| `INTERNAL_TOKEN` | yes | - | Bearer token for privileged REST endpoints and WS connection |
 
 ### AP server connection
 
@@ -34,7 +34,7 @@ All environment variables are application-agnostic.
 | `AP_WS_URL` | no | `ws://localhost:38281` | Archipelago server WebSocket URL |
 | `AP_SERVER_PASSWORD` | no | `""` | Player password for the AP room |
 | `AP_ADMIN_PASSWORD` | no | `""` | Admin password (`!admin login`) |
-| `SLOT_NAMES` | no | `[]` | JSON array of `{"name": str, "game": str}` — slots the bridge connects as |
+| `SLOT_NAMES` | no | `[]` | JSON array of `{"name": str, "game": str}` - slots the bridge connects as |
 
 ### AP process management
 
@@ -95,7 +95,7 @@ Raw integer values never appear in the public API.
 
 ### `SlotStatus`
 ```
-"idle"          AP client_status 5 or 10 — connected, not yet active
+"idle"          AP client_status 5 or 10 - connected, not yet active
 "playing"       AP client_status 20
 "goal_reached"  AP client_status 30
 "done"          AP client_status 40
@@ -103,15 +103,15 @@ Raw integer values never appear in the public API.
 
 ### `SlotType`
 ```
-"player"        AP slot type 1 — standard player slot
-"spectator"     AP slot type 2 — spectator, no game
-"group"         AP slot type 3 — group slot (multiple games in one slot)
+"player"        AP slot type 1 - standard player slot
+"spectator"     AP slot type 2 - spectator, no game
+"group"         AP slot type 3 - group slot (multiple games in one slot)
 ```
 
 ### `ItemClassification`
 Array of strings derived from AP item flags bitmask.
 ```
-[]                       flags 0 — filler
+[]                       flags 0 - filler
 ["progression"]          flags 1
 ["useful"]               flags 2
 ["trap"]                 flags 4
@@ -143,8 +143,8 @@ Applies identically to `forfeitMode`, `releaseMode`, and `collectMode`.
 "goal"          PrintJSON/Goal
 "hint"          PrintJSON/Hint
 "chat"          PrintJSON/Chat
-"join"          PrintJSON/Join    — player connected to the room
-"part"          PrintJSON/Part    — player disconnected from the room
+"join"          PrintJSON/Join    - player connected to the room
+"part"          PrintJSON/Part    - player disconnected from the room
 "release"       PrintJSON/Release
 "collect"       PrintJSON/Collect
 "forfeit"       PrintJSON/Forfeit (release + collect)
@@ -266,8 +266,8 @@ Response `201 Created`:
 ```
 
 Errors:
-- `400 invalid_apworld` — not a valid apworld archive
-- `409 already_exists` — use `PUT` to overwrite
+- `400 invalid_apworld` - not a valid apworld archive
+- `409 already_exists` - use `PUT` to overwrite
 
 ---
 
@@ -754,27 +754,27 @@ messages.
 
 ### Message envelope
 
-**Notification** — bridge → clients, no response expected:
+**Notification** - bridge → clients, no response expected:
 ```jsonc
 { "type": "...", ...payload }
 ```
 
-**Request** — bridge → clients, response expected, has `id`:
+**Request** - bridge → clients, response expected, has `id`:
 ```jsonc
 { "id": "req-a1b2", "type": "request", "action": "...", ...payload }
 ```
 
-**Response** — clients → bridge, correlated by `id`:
+**Response** - clients → bridge, correlated by `id`:
 ```jsonc
 { "id": "req-a1b2", "type": "response", ...payload }
 ```
 
-**Command** — clients → bridge, optional `id` for ack:
+**Command** - clients → bridge, optional `id` for ack:
 ```jsonc
 { "id": "cmd-c3d4", "type": "command", "text": "!admin /release Jean" }
 ```
 
-**Ack** — bridge → client, only when `id` was provided:
+**Ack** - bridge → client, only when `id` was provided:
 ```jsonc
 { "id": "cmd-c3d4", "type": "ack", "queued": true }
 ```
@@ -817,7 +817,14 @@ One AP feed event.
     "type": "item_sent",      // FeedEventType
     "text": "Marie found Mothwing Cloak for Jean",
     "color": "cyan",
-    "timestamp": "2026-05-19T14:30:00Z"
+    "timestamp": "2026-05-19T14:30:00Z",
+    // item_sent only, additive & optional - present when the packet carries a structured
+    // NetworkItem and the finder/location resolve. Item name is in the receiver's game; the
+    // origin check (location) name is in the sender's (finder's) game.
+    "item":     { "id": 67890, "name": "Mothwing Cloak" },
+    "location": { "id": 300,   "name": "Greenpath" },
+    "sender":   { "slot": 1, "name": "Marie", "game": "Hollow Knight" },
+    "receiver": { "slot": 2, "name": "Jean",  "game": "Wind Waker" }
   }
 }
 ```

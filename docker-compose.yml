@@ -1,4 +1,4 @@
-# VPS deployment — copy this file to the server alongside a .env file.
+# VPS deployment - copy this file to the server alongside a .env file.
 # For k8s migration: remove volumes + AP_*_CMD vars; AP becomes a separate pod
 # and data directories become PersistentVolumeClaims.
 

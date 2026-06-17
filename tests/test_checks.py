@@ -48,7 +48,7 @@ AUTH = {"Authorization": "Bearer secret"}
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/checks — public (no auth)
+# GET /slots/{slot}/checks - public (no auth)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -83,7 +83,7 @@ async def test_checks_empty_slot_returns_empty_locations() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/checks — admin (with auth + placements)
+# GET /slots/{slot}/checks - admin (with auth + placements)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_checks_admin_location_without_placement_has_no_item() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/items — public
+# GET /slots/{slot}/items - public
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -170,7 +170,7 @@ async def test_items_public_empty_when_nothing_received() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/items — admin
+# GET /slots/{slot}/items - admin
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -248,7 +248,7 @@ async def test_items_admin_flags_populated_from_store() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot} — single slot detail
+# GET /slots/{slot} - single slot detail
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -286,7 +286,7 @@ async def test_slot_detail_returns_budget_and_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/items/missing — admin only
+# GET /slots/{slot}/items/missing - admin only
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -340,7 +340,7 @@ async def test_missing_items_empty_when_all_received() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /slots/{slot}/spoiler — admin only
+# GET /slots/{slot}/spoiler - admin only
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio

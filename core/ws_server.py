@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class WsServer:
-    """WebSocket server — real-time event bus between the bridge and its clients."""
+    """WebSocket server - real-time event bus between the bridge and its clients."""
 
     def __init__(self, config: Config) -> None:
         self._config = config

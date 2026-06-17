@@ -181,3 +181,81 @@ def test_timestamp_present_and_iso8601() -> None:
     event = _build_feed_event(packet, store)
     assert "timestamp" in event
     assert "T" in event["timestamp"]
+
+
+# ---------------------------------------------------------------------------
+# Structured item origin (story 29.4)
+# ---------------------------------------------------------------------------
+
+def _two_world_store() -> DataPackageStore:
+    """Sender (slot 1) on Mario 64; receiver (slot 2) on Wind Waker."""
+    store = DataPackageStore()
+    store.handle_data_package({
+        "data": {
+            "games": {
+                "Mario 64": {
+                    "item_name_to_id": {},
+                    "location_name_to_id": {"Bowser": 300},
+                },
+                "Wind Waker": {
+                    "item_name_to_id": {"Master Sword": 500},
+                    "location_name_to_id": {},
+                },
+            }
+        }
+    })
+    store.handle_connected({
+        "players": [
+            {"slot": 1, "alias": "Michel_M"},
+            {"slot": 2, "alias": "Pierre"},
+        ],
+        "slot_info": {
+            "1": {"game": "Mario 64"},
+            "2": {"game": "Wind Waker"},
+        },
+    })
+    return store
+
+
+def test_item_sent_attaches_structured_origin() -> None:
+    store = _two_world_store()
+    # NetworkItem: finder=slot 1 (Mario 64) checked location 300 (Bowser) holding item 500
+    # (Master Sword, a slot-2 / Wind Waker item) for the receiving player slot 2.
+    packet = {
+        "type": "ItemSend",
+        "receiving": 2,
+        "item": {"player": 1, "location": 300, "item": 500, "flags": 1},
+        "data": [{"type": "text", "text": "Michel_M found Master Sword for Pierre"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == "item_sent"
+    assert event["item"] == {"id": 500, "name": "Master Sword"}
+    assert event["location"] == {"id": 300, "name": "Bowser"}
+    assert event["sender"] == {"slot": 1, "name": "Michel_M", "game": "Mario 64"}
+    assert event["receiver"] == {"slot": 2, "name": "Pierre", "game": "Wind Waker"}
+    # Prose text is preserved for backward compatibility.
+    assert event["text"] == "Michel_M found Master Sword for Pierre"
+
+
+def test_item_sent_without_network_item_omits_origin() -> None:
+    store = _two_world_store()
+    packet = {
+        "type": "ItemSend",
+        "data": [{"type": "text", "text": "legacy shape"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == "item_sent"
+    assert event["text"] == "legacy shape"
+    for key in ("item", "location", "sender", "receiver"):
+        assert key not in event
+
+
+def test_non_item_event_has_no_origin() -> None:
+    store = _two_world_store()
+    packet = {"type": "Chat", "data": [{"type": "text", "text": "hi"}]}
+    event = _build_feed_event(packet, store)
+
+    for key in ("item", "location", "sender", "receiver"):
+        assert key not in event

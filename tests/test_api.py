@@ -92,6 +92,30 @@ async def test_get_state_with_players() -> None:
         assert slot["client_status"] == 20
 
 
+@pytest.mark.asyncio
+async def test_get_state_includes_game_and_type() -> None:
+    app, state, ap_client = _make_app()
+    state.set_slot_name(1, "Alice_HK1")
+    state.set_slot_name(2, "Bridge")
+    # slot 1 is a real player; slot 2 is the injected TextOnly observer (game "Archipelago").
+    ap_client._store.handle_connected({
+        "players": [{"slot": 1, "alias": "Alice_HK1"}, {"slot": 2, "alias": "Bridge"}],
+        "slot_info": {
+            "1": {"game": "Hollow Knight", "type": 1},
+            "2": {"game": "Archipelago", "type": 0},
+        },
+    })
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/state")
+        data = resp.json()
+
+    assert data["slots"]["1"]["game"] == "Hollow Knight"
+    assert data["slots"]["1"]["slot_type"] == "player"
+    assert data["slots"]["2"]["game"] == "Archipelago"
+    assert data["slots"]["2"]["slot_type"] == "spectator"
+
+
 # ---------------------------------------------------------------------------
 # POST /commands
 # ---------------------------------------------------------------------------
@@ -444,7 +468,7 @@ async def test_get_item_locations_filters_out_other_slots_items() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /spheres — admin only
+# GET /spheres - admin only
 # ---------------------------------------------------------------------------
 
 AUTH_HDR = {"Authorization": "Bearer test-token"}

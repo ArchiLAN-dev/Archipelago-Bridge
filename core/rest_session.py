@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from .ap_client import ArchipelagoClient
-from .deps import get_ap_client, get_bridge_state, require_auth
+from .deps import get_ap_client, require_auth
 from .reachable import _reachable_cache
 from .schemas import (
     CommandRequest,
@@ -20,7 +20,6 @@ from .schemas import (
     SphereResponse,
     SpheresResponse,
 )
-from .state import StateManager
 
 log = logging.getLogger("bridge.rest_session")
 
@@ -63,10 +62,10 @@ async def get_slots(
 
 @router.get("/state")
 async def get_state(
-    state: StateManager = Depends(get_bridge_state),
+    ap_client: ArchipelagoClient = Depends(get_ap_client),
 ) -> dict[str, Any]:
-    state.merge_state_from_save()
-    return state.to_api_dict()
+    # Enriched with per-slot game + type so clients can filter out the TextOnly "Bridge" observer.
+    return ap_client.get_players_state()
 
 
 @router.post("/commands", response_model=OkResponse)

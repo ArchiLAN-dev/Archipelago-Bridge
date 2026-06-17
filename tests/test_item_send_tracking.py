@@ -1,4 +1,4 @@
-"""Story 9.22 — ItemSend tracking uses the structured NetworkItem, not text parsing.
+"""Story 9.22 - ItemSend tracking uses the structured NetworkItem, not text parsing.
 
 Proves checks are tracked even when the human-readable `data` parts are absent/unparseable
 (the case that intermittently failed and left checks to surface only via the apsave).

@@ -150,6 +150,14 @@ class DataPackageStore:
         """The slot's registered name (used to Connect as that slot), not its display alias."""
         return self._slot_names.get(slot, "")
 
+    def slot_game(self, slot: int) -> str:
+        """The world/game a slot is playing, or '' if unknown."""
+        return self._slot_games.get(slot, "")
+
+    def slot_type(self, slot: int) -> str:
+        """The slot's AP type (player / spectator / group), or 'player' if unknown."""
+        return self._slot_types.get(slot, "player")
+
     def resolve_item(self, item_id: int, player_slot: int) -> str:
         game = self._slot_games.get(player_slot, "")
         return self._item_names.get(game, {}).get(item_id, f"Item #{item_id}")
@@ -216,11 +224,44 @@ def _build_feed_event(packet: dict[str, Any], store: DataPackageStore) -> dict[s
         text = str(packet.get("message", "") or packet.get("text", ""))
 
     msg_type = _PRINT_TYPE_MAP.get(packet.get("type", ""), "system")
-    return {
+    event: dict[str, Any] = {
         "type": msg_type,
         "text": text,
         "color": packet.get("color", "white"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Item events: attach structured origin (item / origin check / sender world / receiver) alongside
+    # the prose `text`, so consumers can render "item - check - world (sender)" and filter per slot
+    # without parsing the human-readable string. Additive: omitted when the origin can't be resolved.
+    if msg_type == "item_sent":
+        origin = _build_item_origin(packet, store)
+        if origin is not None:
+            event.update(origin)
+
+    return event
+
+
+def _build_item_origin(packet: dict[str, Any], store: DataPackageStore) -> dict[str, Any] | None:
+    """Structured origin for an ItemSend, from the authoritative NetworkItem (item/location/player)
+    + top-level `receiving`. Mirrors `_track_item_send`'s fast path. Returns None when the packet
+    lacks a structured NetworkItem or the finder/location can't be resolved (fallback shapes keep
+    only the prose `text`). Item name resolves in the receiver's game; the origin check in the
+    sender's (finder's) game."""
+    net_item = packet.get("item")
+    if not isinstance(net_item, dict):
+        return None
+    sender = int(net_item.get("player", 0) or 0)
+    loc_id = int(net_item.get("location", 0) or 0)
+    item_id = int(net_item.get("item", 0) or 0)
+    if not sender or loc_id <= 0:
+        return None
+    receiver = int(packet.get("receiving", sender) or sender)
+    return {
+        "item": {"id": item_id, "name": store.resolve_item(item_id, receiver)},
+        "location": {"id": loc_id, "name": store.resolve_location(loc_id, sender)},
+        "sender": {"slot": sender, "name": store.resolve_player(sender), "game": store.slot_game(sender)},
+        "receiver": {"slot": receiver, "name": store.resolve_player(receiver), "game": store.slot_game(receiver)},
     }
 
 
@@ -302,6 +343,21 @@ class ArchipelagoClient:
             set(self._store._item_names) | set(self._store._location_names)
         )
 
+    def get_players_state(self) -> dict[str, Any]:
+        """`to_api_dict` enriched with per-slot `game` and `slot_type`, so consumers can tell real
+        players from the injected TextOnly "Bridge" observer slot (game "Archipelago"). Refreshes from
+        the apsave first, like the legacy GET /state did inline."""
+        self._state.merge_state_from_save()
+        data = self._state.to_api_dict()
+        slots = data.get("slots", {})
+        if isinstance(slots, dict):
+            for key, slot in slots.items():
+                if isinstance(slot, dict):
+                    sid = int(key)
+                    slot["game"] = self._store.slot_game(sid)
+                    slot["slot_type"] = self._store.slot_type(sid)
+        return data
+
     def get_slots_summary(self) -> list[dict[str, Any]]:
         result = []
         for slot_id, ps in sorted(self._state.get_all().items()):
@@ -368,8 +424,8 @@ class ArchipelagoClient:
         """Open a throwaway connection AS ``slot`` and run a paid self-hint, charging that slot.
 
         The main bridge connection is the TextOnly "Bridge" slot, so a self-hint there resolves
-        against (and would charge) the Bridge slot. To charge slot N — exactly as if the player
-        typed ``!hint <item>`` / ``!hint_location <location>`` in their own client — we open a
+        against (and would charge) the Bridge slot. To charge slot N - exactly as if the player
+        typed ``!hint <item>`` / ``!hint_location <location>`` in their own client - we open a
         second WebSocket, ``Connect`` as slot N using the **server (room) password** (never the
         admin password, never ``!admin login``), send the single ``Say``, read the authoritative
         server reply (a ``Hint`` PrintJSON = success, a text reply = rejection), then close. AP
@@ -738,11 +794,7 @@ class ArchipelagoClient:
                 state_changed = True
 
         event = _build_feed_event(packet, self._store)
-        self._feed_events.append(event)
-        await self._broadcast("feed", {
-            "sessionId": self._config.session_id,
-            "event": event,
-        })
+        await self._emit_feed(event)
 
         if state_changed:
             await self._broadcast_state_changed()
@@ -793,11 +845,38 @@ class ArchipelagoClient:
             "cause": cause if isinstance(cause, str) else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        self._feed_events.append(death_event)
+        await self._emit_feed(death_event)
+
+    async def _emit_feed(self, event: dict[str, Any]) -> None:
+        """Record one feed event, broadcast it to local WS clients, and push it to Symfony so it can
+        publish to the Mercure topic runs/{id}/feed (mirrors the players/hints/reachable push model)."""
+        self._feed_events.append(event)
         await self._broadcast("feed", {
             "sessionId": self._config.session_id,
-            "event": death_event,
+            "event": event,
         })
+        await self._push_feed_to_api(event)
+
+    async def _push_feed_to_api(self, event: dict[str, Any]) -> None:
+        """Push a single feed event to Symfony so it publishes the Mercure topic runs/{id}/feed the
+        frontend (EventFeed + OBS overlays) subscribes to. Without this the feed only ever reaches
+        local WS clients and the GET /feed snapshot - never the live Mercure stream."""
+        url = self._config.central_api_url
+        secret = self._config.central_api_secret
+        if not url or not secret:
+            return
+        endpoint = (
+            f"{url.rstrip('/')}"
+            f"/api/v1/internal/sessions/{self._config.session_id}/feed-push"
+        )
+        headers = {"X-Internal-Secret": secret}
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(endpoint, json=event, headers=headers)
+                if resp.status_code not in (200, 204):
+                    self._log.warning("feed push: unexpected status %d", resp.status_code)
+        except Exception as exc:
+            self._log.warning("feed push error: %s", exc)
 
     # ------------------------------------------------------------------
     # State tracking helpers
@@ -1002,7 +1081,7 @@ class ArchipelagoClient:
         return self._placements.get(finder_slot, {}).get(location_id)
 
     def _slot_location_total(self, slot_id: int, game: str) -> int:
-        """A slot's real location count: spoiler placements when loaded (authoritative — this is
+        """A slot's real location count: spoiler placements when loaded (authoritative - this is
         the set AP uses), else the full DataPackage size as a fallback. The DataPackage lists
         *every* location the game defines, which is far larger than the locations actually in this
         seed, so using it inflates both checks_total and the hint cost (hint_cost% × locations)."""

@@ -153,7 +153,7 @@ async def test_fetch_hint_points_unknown_slot_returns_none() -> None:
 @pytest.mark.asyncio
 async def test_connect_as_slot_sets_authoritative_hint_cost() -> None:
     # AP's Connected lists the slot's REAL locations (checked + missing = 130); at 10% the
-    # authoritative cost is 13 — overriding any inflated spoiler/DataPackage estimate (story 9.32).
+    # authoritative cost is 13 - overriding any inflated spoiler/DataPackage estimate (story 9.32).
     connected = [{
         "cmd": "Connected", "slot": 2, "hint_points": 52,
         "checked_locations": list(range(30)),
