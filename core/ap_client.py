@@ -986,6 +986,9 @@ class ArchipelagoClient:
         headers = {"X-Internal-Secret": secret}
         payload = {
             "slotId": slot_id,
+            # slot_name lets Symfony match the session_slot for event/personal runs (weekly entries
+            # key off the session id). Matched by name, not index - see RecordSlotGoal.
+            "slotName": ps.slot_name,
             "checksTotal": ps.checks_done,
             "itemsTotal": ps.items_received,
             "goalReachedAt": ps.goal_reached_at,
