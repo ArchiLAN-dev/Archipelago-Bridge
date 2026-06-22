@@ -16,6 +16,19 @@ _reachable_daemons: dict[int, asyncio.subprocess.Process] = {}
 _daemon_ready_events: dict[int, asyncio.Event] = {}
 
 
+def _result_error(result: object) -> str | None:
+    """Return the error message if a reachable.py payload is a structured error, else None.
+
+    reachable.py emits {"error": "..."} (exit 0, valid JSON) when a single per-request compute
+    fails - e.g. in --daemon mode. Without this check the bridge would cache that payload and
+    hand it back as a successful reachability result (HTTP 200), and the cached error would stick
+    until the slot's state changes. Surfacing it as (None, error) lets the caller raise properly.
+    """
+    if isinstance(result, dict) and "error" in result:
+        return str(result["error"])
+    return None
+
+
 async def _start_daemon(slot: int, arch_file: str, log: logging.Logger) -> None:
     """Start reachable.py in --daemon mode for a slot and wait for it to signal ready."""
     event = asyncio.Event()
@@ -112,6 +125,9 @@ async def _compute_reachable(
                 result = json.loads(output)
             except json.JSONDecodeError:
                 return None, "invalid JSON from reachable.py"
+            err = _result_error(result)
+            if err is not None:
+                return None, err
             _reachable_cache[slot] = (cache_key, result)
             log.info("reachable: docker slot=%d reachable=%d",
                      slot, result.get("counts", {}).get("reachable_now", 0))
@@ -129,6 +145,9 @@ async def _compute_reachable(
                 await daemon_proc.stdin.drain()
                 resp = await asyncio.wait_for(daemon_proc.stdout.readline(), timeout=10.0)
                 result = json.loads(resp.decode())
+                err = _result_error(result)
+                if err is not None:
+                    return None, err
                 _reachable_cache[slot] = (cache_key, result)
                 log.info("reachable: daemon slot=%d reachable=%d",
                          slot, result.get("counts", {}).get("reachable_now", 0))
@@ -181,6 +200,10 @@ async def _compute_reachable(
         result = json.loads(stdout)
     except json.JSONDecodeError:
         return None, "invalid JSON from reachable.py"
+
+    err = _result_error(result)
+    if err is not None:
+        return None, err
 
     _reachable_cache[slot] = (cache_key, result)
     log.info("reachable: done slot=%d reachable=%d",
