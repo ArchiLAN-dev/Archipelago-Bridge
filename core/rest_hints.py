@@ -177,6 +177,14 @@ async def update_hint_status(
             detail=f"no hint for slot={slot} location_id={location_id}",
         )
 
+    # AP only accepts UpdateHint from the hint's receiving/finding player, not from the main
+    # "Bridge" connection - so we send it over a connect-as-slot connection (like the paid self-hint),
+    # with ``player`` = the hint's receiving player. Without this the change never reaches AP's data
+    # storage and native clients (text launcher) don't see it.
+    ok = await ap_client.update_hint(slot, hint.receiving_player, location_id, body.status)
+    if not ok:
+        raise HTTPException(status_code=502, detail="ap_update_failed")
+
     updated = HintInfo(
         receiving_player=hint.receiving_player,
         finding_player=hint.finding_player,
@@ -191,13 +199,6 @@ async def update_hint_status(
         location_name=hint.location_name,
     )
     state.add_hint(slot, updated)
-
-    await ap_client.send_packet({
-        "cmd": "UpdateHint",
-        "player": slot,
-        "location": location_id,
-        "status": body.status,
-    })
     await ap_client._broadcast_hints(slot)
 
     log.info("hint status updated: slot=%d locationId=%d status=%d", slot, location_id, body.status)

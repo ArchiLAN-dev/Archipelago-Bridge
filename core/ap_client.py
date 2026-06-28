@@ -468,6 +468,35 @@ class ArchipelagoClient:
         except (asyncio.TimeoutError, _SlotConnectRefused, OSError, websockets.WebSocketException):
             return None
 
+    async def update_hint(
+        self, slot: int, receiving_player: int, location_id: int, status: int, *, timeout: float = 15.0
+    ) -> bool:
+        """Connect AS ``slot`` and send an AP ``UpdateHint`` so the new status lands in the server's
+        data storage (and reaches the player's real client / text launcher).
+
+        AP only lets a hint's *receiving* or *finding* player change its status; the main bridge
+        connection is the TextOnly "Bridge" slot and has no such permission - sending UpdateHint
+        there is silently ignored by the server. So, exactly like the paid self-hint (story 9.30),
+        we open a throwaway connection AS ``slot`` (which is the receiving or finding player of the
+        hint shown on its page). ``player`` in the packet is the hint's receiving player. AP closes
+        the socket cleanly, flushing the packet, so the change is persisted server-side.
+        Best-effort: returns False on connect/transport failure.
+        """
+        if not self._store.slot_name(slot) or not self._store._slot_games.get(slot, ""):
+            return False
+        try:
+            async with websockets.connect(self._config.ap_ws_url) as ws:
+                await self._connect_as_slot(ws, slot, timeout)
+                await ws.send(json.dumps([{
+                    "cmd": "UpdateHint",
+                    "player": receiving_player,
+                    "location": location_id,
+                    "status": status,
+                }]))
+            return True
+        except (_SlotConnectRefused, OSError, websockets.WebSocketException, asyncio.TimeoutError):
+            return False
+
     async def _connect_as_slot(self, ws: Any, slot: int, timeout: float) -> dict[str, Any]:
         """Drain RoomInfo, Connect AS ``slot`` (server password, TextOnly), return Connected.
 
