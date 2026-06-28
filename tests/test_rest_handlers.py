@@ -423,7 +423,8 @@ def _seed_hint(ap_client: ArchipelagoClient, state: StateManager, slot: int, loc
 async def test_update_hint_status_success() -> None:
     app, state, ap_client = _make_app()
     ap_client.ws_connected = True
-    ap_client.send_packet = AsyncMock()
+    # Sent over a connect-as-slot connection (AP rejects UpdateHint from the main Bridge slot).
+    ap_client.update_hint = AsyncMock(return_value=True)
     ap_client._broadcast_hints = AsyncMock()
     _seed_hint(ap_client, state, slot=1, location_id=42)
 
@@ -435,16 +436,29 @@ async def test_update_hint_status_success() -> None:
         assert data["slot"] == 1
         assert data["locationId"] == 42
 
-    ap_client.send_packet.assert_awaited_once_with({
-        "cmd": "UpdateHint",
-        "player": 1,
-        "location": 42,
-        "status": 30,
-    })
+    # (slot, receiving_player, location_id, status) - player is the hint's receiving player.
+    ap_client.update_hint.assert_awaited_once_with(1, 1, 42, 30)
     ap_client._broadcast_hints.assert_awaited_once_with(1)
 
     hints = state.get_hints(1)
     assert hints[0].status == 30
+
+
+@pytest.mark.asyncio
+async def test_update_hint_status_ap_failure_returns_502() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.update_hint = AsyncMock(return_value=False)
+    ap_client._broadcast_hints = AsyncMock()
+    _seed_hint(ap_client, state, slot=1, location_id=42, status=0)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/slots/1/hints/42", json={"status": 30})
+        assert resp.status_code == 502
+
+    # Local state must not be updated when AP rejected the change.
+    assert state.get_hints(1)[0].status == 0
+    ap_client._broadcast_hints.assert_not_awaited()
 
 
 @pytest.mark.asyncio
