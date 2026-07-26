@@ -22,6 +22,12 @@ from .state import StateManager
 
 _WS_RETRY_DELAYS = [1, 2, 4, 8, 16, 30]
 
+# The websockets library defaults to max_size=1 MiB, but an AP DataPackage frame grows with
+# the session's games (16 large custom worlds exceeded it - close 1009 "message too big" on
+# every connect, so the bridge could never join). AP's own CommonClient connects with
+# max_size=None; keep a generous bound instead so a rogue server cannot exhaust memory.
+_WS_MAX_SIZE = 64 * 2**20
+
 # Maps AP PrintJSON types to the spec's FeedEventType names
 _PRINT_TYPE_MAP: dict[str, str] = {
     "Hint": "hint",
@@ -437,7 +443,7 @@ class ArchipelagoClient:
                                    message=f"slot {slot} has no known name/game")
 
         try:
-            async with websockets.connect(self._config.ap_ws_url) as ws:
+            async with websockets.connect(self._config.ap_ws_url, max_size=_WS_MAX_SIZE) as ws:
                 try:
                     connected = await self._connect_as_slot(ws, slot, timeout)
                 except _SlotConnectRefused as exc:
@@ -462,7 +468,7 @@ class ArchipelagoClient:
         if not self._store.slot_name(slot) or not self._store._slot_games.get(slot, ""):
             return None
         try:
-            async with websockets.connect(self._config.ap_ws_url) as ws:
+            async with websockets.connect(self._config.ap_ws_url, max_size=_WS_MAX_SIZE) as ws:
                 connected = await self._connect_as_slot(ws, slot, timeout)
                 return self._store_hint_points(slot, connected)
         except (asyncio.TimeoutError, _SlotConnectRefused, OSError, websockets.WebSocketException):
@@ -485,7 +491,7 @@ class ArchipelagoClient:
         if not self._store.slot_name(slot) or not self._store._slot_games.get(slot, ""):
             return False
         try:
-            async with websockets.connect(self._config.ap_ws_url) as ws:
+            async with websockets.connect(self._config.ap_ws_url, max_size=_WS_MAX_SIZE) as ws:
                 await self._connect_as_slot(ws, slot, timeout)
                 await ws.send(json.dumps([{
                     "cmd": "UpdateHint",
@@ -595,7 +601,7 @@ class ArchipelagoClient:
     # ------------------------------------------------------------------
 
     async def _connect_and_run(self) -> None:
-        async with websockets.connect(self._config.ap_ws_url) as ws:
+        async with websockets.connect(self._config.ap_ws_url, max_size=_WS_MAX_SIZE) as ws:
             self._ws = ws
             self.ws_connected = True
             self._log.info("connected to archipelago ws at %s", self._config.ap_ws_url)
