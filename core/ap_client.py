@@ -311,6 +311,11 @@ class ArchipelagoClient:
         # Spoiler-derived placements: finder_slot → {location_id → (item_id, receiver_slot)}
         self._placements: dict[int, dict[int, tuple[int, int]]] = {}
 
+        # Hints already announced on the feed, keyed (finding_player, location_id) - a hint is
+        # identified by where it points. Seeded by the initial Retrieved snapshot so a bridge
+        # restart does not re-announce (and re-persist) every existing hint (story 32.12).
+        self._seen_feed_hints: set[tuple[int, int]] = set()
+
         # Per-slot connection tracking (populated from Join/Part PrintJSON)
         self._connected_slots: set[int] = set()
 
@@ -748,7 +753,8 @@ class ArchipelagoClient:
         elif cmd == "SetReply":
             hint_slot = self._slot_from_hint_key(str(packet.get("key", "")))
             if hint_slot is not None:
-                await self._ingest_hint_storage(hint_slot, packet.get("value"))
+                # Live change: a hint never seen before is also announced on the feed.
+                await self._ingest_hint_storage(hint_slot, packet.get("value"), announce=True)
 
         elif cmd == "Bounced":
             await self._handle_bounced(packet)
@@ -839,8 +845,19 @@ class ArchipelagoClient:
                 self._connected_slots.discard(slot)
                 state_changed = True
 
-        event = _build_feed_event(packet, self._store)
-        await self._emit_feed(event)
+        # A Hint PrintJSON only reaches the bridge when its own slot is involved (story 9.27);
+        # the general path is the data-storage ingest below. Share one seen-set between the two
+        # so the same hint is never announced (and persisted) twice, whichever arrives first.
+        skip_feed = False
+        if msg_type == "Hint":
+            hint_key = self._hint_feed_key_from_packet(packet)
+            if hint_key is not None:
+                skip_feed = hint_key in self._seen_feed_hints
+                self._seen_feed_hints.add(hint_key)
+
+        if not skip_feed:
+            event = _build_feed_event(packet, self._store)
+            await self._emit_feed(event)
 
         if state_changed:
             await self._broadcast_state_changed()
@@ -1242,8 +1259,49 @@ class ArchipelagoClient:
             location_name=self._store.resolve_location(location_id, finding_player),
         )
 
-    async def _ingest_hint_storage(self, slot: int, raw_value: Any) -> None:
-        """Replace a slot's hints from a data-storage payload and push when changed."""
+    def _hint_feed_key_from_packet(self, packet: dict[str, Any]) -> tuple[int, int] | None:
+        """Feed identity of a Hint PrintJSON: (finding_player, location_id), or None if absent."""
+        net_item = packet.get("item")
+        if not isinstance(net_item, dict):
+            return None
+        finder = int(net_item.get("player", 0) or 0)
+        loc_id = int(net_item.get("location", 0) or 0)
+        if not finder or loc_id <= 0:
+            return None
+        return (finder, loc_id)
+
+    async def _emit_hint_feed_event(self, hint: HintInfo) -> None:
+        """Announce a newly-hinted item on the feed (story 32.12). Hints reach the bridge through
+        the data storage (story 9.27) - the Hint PrintJSON only goes to the involved slots - so
+        the feed event is synthesized here in the exact shape `_build_feed_event` produces."""
+        await self._emit_feed({
+            "type": "hint",
+            "text": (
+                f"[Hint]: {hint.receiving_player_name}'s {hint.item_name} is at "
+                f"{hint.location_name} in {hint.finding_player_name}'s world"
+            ),
+            "color": "white",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "item": {"id": hint.item_id, "name": hint.item_name, "flags": hint.item_flags},
+            "location": {"id": hint.location_id, "name": hint.location_name},
+            "sender": {
+                "slot": hint.finding_player,
+                "name": hint.finding_player_name,
+                "game": self._store.slot_game(hint.finding_player),
+            },
+            "receiver": {
+                "slot": hint.receiving_player,
+                "name": hint.receiving_player_name,
+                "game": self._store.slot_game(hint.receiving_player),
+            },
+        })
+
+    async def _ingest_hint_storage(self, slot: int, raw_value: Any, announce: bool = False) -> None:
+        """Replace a slot's hints from a data-storage payload and push when changed.
+
+        `announce` marks never-seen hints as feed events (story 32.12): True for live SetReply
+        updates; False for the initial Retrieved snapshot, which must only seed the seen-set -
+        a bridge restart re-delivers every existing hint and must not re-persist them."""
         if not isinstance(raw_value, list):
             return
         hints: list[HintInfo] = []
@@ -1252,6 +1310,13 @@ class ArchipelagoClient:
                 hint = self._hint_from_storage(raw)
                 if hint is not None:
                     hints.append(hint)
+        for hint in hints:
+            key = (hint.finding_player, hint.location_id)
+            if key in self._seen_feed_hints:
+                continue
+            self._seen_feed_hints.add(key)
+            if announce:
+                await self._emit_hint_feed_event(hint)
         if self._state.set_hints(slot, hints):
             await self._broadcast_hints(slot)
 

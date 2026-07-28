@@ -79,6 +79,73 @@ async def test_ingest_storage_ignores_malformed_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_setreply_announces_new_hints_on_feed_once() -> None:
+    """Story 32.12: hints reach the feed through the storage path (the Hint PrintJSON only goes
+    to the involved slots). The initial Retrieved snapshot seeds silently; a live SetReply
+    announces only never-seen hints, exactly once."""
+    ap, _ = _client()
+    ap._broadcast_hints = AsyncMock()  # type: ignore[method-assign]
+    emit = AsyncMock()
+    ap._emit_feed = emit  # type: ignore[method-assign]
+
+    # Initial Retrieved snapshot (announce=False): seeds the seen-set, no feed event.
+    await ap._ingest_hint_storage(2, [_raw_hint(200)])
+    emit.assert_not_awaited()
+
+    # Live SetReply with one known + one new hint: only the new one is announced.
+    await ap._ingest_hint_storage(2, [_raw_hint(200), _raw_hint(201, item=101)], announce=True)
+    assert emit.await_count == 1
+    event = emit.call_args.args[0]
+    assert event["type"] == "hint"
+    assert event["item"]["id"] == 101
+    assert event["location"]["id"] == 201
+    assert event["sender"]["slot"] == 1
+    assert event["receiver"]["slot"] == 2
+
+    # Re-delivery of the same list (e.g. found-status flip) announces nothing more.
+    await ap._ingest_hint_storage(2, [_raw_hint(200), _raw_hint(201, item=101)], announce=True)
+    assert emit.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_print_json_hint_shares_the_seen_set_with_storage() -> None:
+    """A hint involving the bridge's own slot arrives on BOTH channels (PrintJSON + SetReply);
+    whichever lands first wins, the other is skipped."""
+    ap, _ = _client()
+    ap._broadcast_hints = AsyncMock()  # type: ignore[method-assign]
+    ap._broadcast_state_changed = AsyncMock()  # type: ignore[method-assign]
+    ap._track_hint = AsyncMock()  # type: ignore[method-assign]
+    emit = AsyncMock()
+    ap._emit_feed = emit  # type: ignore[method-assign]
+
+    # Storage announces first...
+    await ap._ingest_hint_storage(2, [_raw_hint(200)], announce=True)
+    assert emit.await_count == 1
+
+    # ...then the same hint's PrintJSON arrives: no second feed event.
+    await ap._handle_print_json({
+        "type": "Hint",
+        "receiving": 2,
+        "item": {"player": 1, "location": 200, "item": 100, "flags": 0},
+        "data": [{"type": "text", "text": "already announced"}],
+    })
+    assert emit.await_count == 1
+
+    # The reverse order: a PrintJSON for a fresh hint emits and seeds the seen-set...
+    await ap._handle_print_json({
+        "type": "Hint",
+        "receiving": 2,
+        "item": {"player": 1, "location": 300, "item": 100, "flags": 0},
+        "data": [{"type": "text", "text": "fresh"}],
+    })
+    assert emit.await_count == 2
+
+    # ...so the follow-up SetReply stays silent.
+    await ap._ingest_hint_storage(2, [_raw_hint(200), _raw_hint(300)], announce=True)
+    assert emit.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_broadcast_resolves_save_derived_id_only_names() -> None:
     """The apsave reconcile overwrites ps._hints with id-only hints (empty names). A live push
     must resolve them, like GET does - otherwise the UI shows 'Item #123'/'Location #456'."""
