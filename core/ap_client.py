@@ -237,13 +237,22 @@ def _build_feed_event(packet: dict[str, Any], store: DataPackageStore) -> dict[s
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Item events: attach structured origin (item / origin check / sender world / receiver) alongside
-    # the prose `text`, so consumers can render "item - check - world (sender)" and filter per slot
-    # without parsing the human-readable string. Additive: omitted when the origin can't be resolved.
-    if msg_type == "item_sent":
+    # Item and hint events: attach structured origin (item / origin check / sender world / receiver)
+    # alongside the prose `text`, so consumers can render "item - check - world (sender)" and filter
+    # per slot without parsing the human-readable string. An AP Hint carries the same NetworkItem
+    # shape as an ItemSend (player = would-be finder), so the one builder serves both (story 32.12).
+    # Additive: omitted when the origin can't be resolved.
+    if msg_type in ("item_sent", "hint"):
         origin = _build_item_origin(packet, store)
         if origin is not None:
             event.update(origin)
+
+    # Goal events: attach the finishing player (AP sends only the slot number), so consumers can
+    # place the completion on a per-player timeline without parsing the prose (story 32.12).
+    if msg_type == "goal":
+        slot = int(packet.get("slot", 0) or 0)
+        if slot:
+            event["sender"] = {"slot": slot, "name": store.resolve_player(slot), "game": store.slot_game(slot)}
 
     return event
 

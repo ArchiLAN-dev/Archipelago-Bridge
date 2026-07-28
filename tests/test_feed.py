@@ -273,3 +273,50 @@ def test_non_item_event_has_no_origin() -> None:
 
     for key in ("item", "location", "sender", "receiver"):
         assert key not in event
+
+
+# ---------------------------------------------------------------------------
+# Hint origin & goal sender (story 32.12)
+# ---------------------------------------------------------------------------
+
+def test_hint_attaches_structured_origin() -> None:
+    store = _two_world_store()
+    # An AP Hint carries the same NetworkItem shape as an ItemSend: slot 1 would find
+    # Master Sword (a slot-2 item) at Bowser.
+    packet = {
+        "type": "Hint",
+        "receiving": 2,
+        "item": {"player": 1, "location": 300, "item": 500, "flags": 1},
+        "found": False,
+        "data": [{"type": "text", "text": "[Hint]: Pierre's Master Sword is at Bowser"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == "hint"
+    assert event["item"] == {"id": 500, "name": "Master Sword", "flags": 1}
+    assert event["location"] == {"id": 300, "name": "Bowser"}
+    assert event["sender"] == {"slot": 1, "name": "Michel_M", "game": "Mario 64"}
+    assert event["receiver"] == {"slot": 2, "name": "Pierre", "game": "Wind Waker"}
+
+
+def test_goal_attaches_finishing_player() -> None:
+    store = _two_world_store()
+    packet = {
+        "type": "Goal",
+        "slot": 2,
+        "team": 0,
+        "data": [{"type": "text", "text": "Pierre has completed their goal"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == "goal"
+    assert event["sender"] == {"slot": 2, "name": "Pierre", "game": "Wind Waker"}
+
+
+def test_goal_without_slot_has_no_sender() -> None:
+    store = _two_world_store()
+    packet = {"type": "Goal", "data": [{"type": "text", "text": "someone finished"}]}
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == "goal"
+    assert "sender" not in event
