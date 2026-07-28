@@ -253,7 +253,8 @@ def _build_item_origin(packet: dict[str, Any], store: DataPackageStore) -> dict[
     + top-level `receiving`. Mirrors `_track_item_send`'s fast path. Returns None when the packet
     lacks a structured NetworkItem or the finder/location can't be resolved (fallback shapes keep
     only the prose `text`). Item name resolves in the receiver's game; the origin check in the
-    sender's (finder's) game."""
+    sender's (finder's) game. `flags` are the AP classification bits carried by the NetworkItem
+    (1 = progression), so consumers can mark progression finds without a datapackage lookup."""
     net_item = packet.get("item")
     if not isinstance(net_item, dict):
         return None
@@ -263,8 +264,9 @@ def _build_item_origin(packet: dict[str, Any], store: DataPackageStore) -> dict[
     if not sender or loc_id <= 0:
         return None
     receiver = int(packet.get("receiving", sender) or sender)
+    flags = int(net_item.get("flags", 0) or 0)
     return {
-        "item": {"id": item_id, "name": store.resolve_item(item_id, receiver)},
+        "item": {"id": item_id, "name": store.resolve_item(item_id, receiver), "flags": flags},
         "location": {"id": loc_id, "name": store.resolve_location(loc_id, sender)},
         "sender": {"slot": sender, "name": store.resolve_player(sender), "game": store.slot_game(sender)},
         "receiver": {"slot": receiver, "name": store.resolve_player(receiver), "game": store.slot_game(receiver)},

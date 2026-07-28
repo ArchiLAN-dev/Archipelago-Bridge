@@ -230,12 +230,26 @@ def test_item_sent_attaches_structured_origin() -> None:
     event = _build_feed_event(packet, store)
 
     assert event["type"] == "item_sent"
-    assert event["item"] == {"id": 500, "name": "Master Sword"}
+    assert event["item"] == {"id": 500, "name": "Master Sword", "flags": 1}
     assert event["location"] == {"id": 300, "name": "Bowser"}
     assert event["sender"] == {"slot": 1, "name": "Michel_M", "game": "Mario 64"}
     assert event["receiver"] == {"slot": 2, "name": "Pierre", "game": "Wind Waker"}
     # Prose text is preserved for backward compatibility.
     assert event["text"] == "Michel_M found Master Sword for Pierre"
+
+
+def test_item_sent_without_flags_defaults_to_zero() -> None:
+    store = _two_world_store()
+    # A NetworkItem missing `flags` (older server) still yields the structured origin, flags=0.
+    packet = {
+        "type": "ItemSend",
+        "receiving": 2,
+        "item": {"player": 1, "location": 300, "item": 500},
+        "data": [{"type": "text", "text": "x"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["item"] == {"id": 500, "name": "Master Sword", "flags": 0}
 
 
 def test_item_sent_without_network_item_omits_origin() -> None:
