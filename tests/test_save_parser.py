@@ -192,3 +192,62 @@ def test_latest_file_selected_by_mtime(tmp_path: Path) -> None:
     result = load_save_state(str(tmp_path))
     assert result[1].checks_done == 2
     assert result[1].client_status == 20
+# ---------------------------------------------------------------------------
+# received_items slot keys: (team, slot, remote_items)
+#
+# MultiServer.send_items_to appends every item a slot receives to the remote_items=True list
+# and only the items sent by *other* players to the False one, so True is a superset of False.
+# _save_slot_map used to concatenate both, counting every received item twice. That inflated
+# count-based logic in the reachability pass (state.has(item, player, n)): on The Wind Waker a
+# single Progressive Bow read as two, which satisfies has_fire_arrows / has_ice_arrows and
+# reported six unreachable checks as accessible.
+# ---------------------------------------------------------------------------
+
+def test_received_items_are_not_doubled(tmp_path: Path) -> None:
+    """Both remote_items lists describe the same slot: keep one, never concatenate."""
+    items = [(500, 100, 2), (501, 101, 3), (502, 102, 4)]
+    data = {
+        "location_checks": {(0, 6): {100}},
+        "received_items": {(0, 6, False): list(items), (0, 6, True): list(items)},
+    }
+    result = load_save_state(_write_apsave(tmp_path, data))
+
+    assert result[6].items_received == 3
+    assert result[6]._received_items == [(500, 2, 100), (501, 3, 101), (502, 4, 102)]
+
+
+@pytest.mark.parametrize("reversed_keys", [False, True])
+def test_remote_true_list_wins_over_the_partial_one(tmp_path: Path, reversed_keys: bool) -> None:
+    """`True` holds every item, `False` only those sent by other players."""
+    from_others = [(500, 100, 2)]
+    everything = [(500, 100, 2), (600, 200, 6)]
+    keys = [((0, 6, True), everything), ((0, 6, False), from_others)]
+    if not reversed_keys:
+        keys.reverse()
+    data = {"location_checks": {(0, 6): {100}}, "received_items": dict(keys)}
+
+    result = load_save_state(_write_apsave(tmp_path, data))
+
+    assert result[6].items_received == 2
+    assert result[6]._received_items == [(500, 2, 100), (600, 6, 200)]
+
+
+def test_received_items_fall_back_to_the_partial_list(tmp_path: Path) -> None:
+    data = {
+        "location_checks": {(0, 6): {100}},
+        "received_items": {(0, 6, False): [(500, 100, 2)]},
+    }
+    result = load_save_state(_write_apsave(tmp_path, data))
+
+    assert result[6].items_received == 1
+
+
+def test_other_teams_are_ignored(tmp_path: Path) -> None:
+    data = {
+        "location_checks": {(0, 6): {100}, (1, 6): {999}},
+        "received_items": {(0, 6, True): [(500, 100, 2)], (1, 6, True): [(999, 900, 2)]},
+    }
+    result = load_save_state(_write_apsave(tmp_path, data))
+
+    assert result[6].checks_done == 1
+    assert result[6].items_received == 1
