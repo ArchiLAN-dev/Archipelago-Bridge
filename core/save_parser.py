@@ -14,25 +14,34 @@ from .domain import HintInfo, PlayerState
 
 
 def _save_slot_map(mapping: dict[Any, Any]) -> dict[int, Any]:
-    """Normalize AP save keys: (team, slot[, ...]) tuples → slot int (team 0 only).
+    """Normalize AP save keys: (team, slot[, remote_items]) tuples to a slot int (team 0 only).
 
-    received_items uses 3-element keys (team, slot, remote_flag) - values for the
-    same slot are merged so the total count is correct.
+    `received_items` uses 3-element keys (team, slot, remote_items). AP appends every item a
+    slot receives to the `remote_items=True` list, and only the items coming from *other*
+    players to the `False` one (MultiServer.send_items_to), so `True` is a superset of
+    `False`, never a disjoint half. Concatenating the two counted every item twice, which
+    inflated count-based logic in the reachability pass (`state.has(item, player, n)`: a
+    single Progressive Bow read as two, unlocking fire/ice arrows) and doubled the reported
+    "items received". Keep the `True` list; fall back to `False` when it is missing.
     """
     result: dict[int, Any] = {}
     for key, val in mapping.items():
-        if isinstance(key, tuple) and len(key) >= 2 and key[0] == 0:
-            slot = int(key[1])
-            if slot in result:
-                existing = result[slot]
-                if isinstance(existing, list) and isinstance(val, list):
-                    result[slot] = existing + val
-                elif isinstance(existing, (set, frozenset)) and isinstance(val, (set, frozenset)):
-                    result[slot] = existing | val
-            else:
-                result[slot] = val
-        elif isinstance(key, int):
+        if isinstance(key, int):
             result[key] = val
+            continue
+        if not (isinstance(key, tuple) and len(key) >= 2 and key[0] == 0):
+            continue
+        slot = int(key[1])
+        if len(key) >= 3:
+            # (team, slot, remote_items): the remote_items=True list wins, whatever the order.
+            if key[2] or slot not in result:
+                result[slot] = val
+            continue
+        existing = result.get(slot)
+        if isinstance(existing, (set, frozenset)) and isinstance(val, (set, frozenset)):
+            result[slot] = existing | val
+        else:
+            result[slot] = val
     return result
 
 
