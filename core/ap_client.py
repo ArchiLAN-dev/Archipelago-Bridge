@@ -316,8 +316,17 @@ class ArchipelagoClient:
         # restart does not re-announce (and re-persist) every existing hint (story 32.12).
         self._seen_feed_hints: set[tuple[int, int]] = set()
 
-        # Per-slot connection tracking (populated from Join/Part PrintJSON)
-        self._connected_slots: set[int] = set()
+        # Per-slot presence: how many *playing* clients hold each slot (story 16.18).
+        #
+        # Presence used to be a set seeded from ``Connected.players`` - which is the whole
+        # multiworld roster (``get_players_package``), not the connected clients - so every slot
+        # read as connected from the moment the bridge attached. Join/Part is the only per-client
+        # signal AP sends, and it carries the client's tags, which is what lets the bridge exclude
+        # itself and any tracker: a slot is "being played" only when a real game client holds it.
+        #
+        # A count rather than a set, because a slot can carry several clients at once - a co-op
+        # game with two players on one world, or a player with a tracker open beside their game.
+        self._playing_clients: dict[int, int] = {}
 
         # Seed metadata
         self._seed_name: str = ""
@@ -613,6 +622,40 @@ class ArchipelagoClient:
         return "".join(parts)
 
     # ------------------------------------------------------------------
+    # Presence
+    # ------------------------------------------------------------------
+
+    #: Tags of a client that watches a slot without playing it. The bridge connects as TextOnly,
+    #: so this is also what keeps it from marking the slot it attaches to as occupied - which is
+    #: what happens on an imported seed, where there is no observer slot to spare and the bridge
+    #: sits on a real player's.
+    _NON_PLAYING_TAGS = frozenset({"TextOnly", "Tracker", "HintGame"})
+
+    @property
+    def _connected_slots(self) -> set[int]:
+        """Slots a real game client is currently holding."""
+        return {slot for slot, count in self._playing_clients.items() if count > 0}
+
+    @classmethod
+    def _is_playing_client(cls, tags: list[str]) -> bool:
+        return not any(tag in cls._NON_PLAYING_TAGS for tag in tags)
+
+    def _client_joined(self, slot: int, tags: list[str]) -> bool:
+        """True when this join changed presence."""
+        if not slot or not self._is_playing_client(tags):
+            return False
+        self._playing_clients[slot] = self._playing_clients.get(slot, 0) + 1
+        return self._playing_clients[slot] == 1
+
+    def _client_left(self, slot: int, tags: list[str]) -> bool:
+        """True when this part changed presence."""
+        if not slot or not self._is_playing_client(tags):
+            return False
+        remaining = max(0, self._playing_clients.get(slot, 0) - 1)
+        self._playing_clients[slot] = remaining
+        return remaining == 0
+
+    # ------------------------------------------------------------------
     # Connection loop
     # ------------------------------------------------------------------
 
@@ -778,12 +821,13 @@ class ArchipelagoClient:
         for slot_str, info in slot_info.items():
             if isinstance(info, dict):
                 self._state.set_slot_name(int(slot_str), info.get("name", ""))
+        # `players` is the multiworld roster, not the connected clients (MultiServer's
+        # get_players_package), so it names slots and says nothing about presence.
         for p in players:
             slot = int(p.get("slot", 0))
             name = p.get("alias", p.get("name", ""))
             if slot:
                 self._state.set_slot_name(slot, name)
-                self._connected_slots.add(slot)
 
         checked_locs = [int(loc) for loc in packet.get("checked_locations", [])]
         missing_locs = packet.get("missing_locations", [])
@@ -835,14 +879,10 @@ class ArchipelagoClient:
             await self._track_hint(packet)
             state_changed = True
         elif msg_type == "Join":
-            slot = int(packet.get("slot", 0))
-            if slot:
-                self._connected_slots.add(slot)
+            if self._client_joined(int(packet.get("slot", 0)), packet.get("tags", [])):
                 state_changed = True
         elif msg_type == "Part":
-            slot = int(packet.get("slot", 0))
-            if slot:
-                self._connected_slots.discard(slot)
+            if self._client_left(int(packet.get("slot", 0)), packet.get("tags", [])):
                 state_changed = True
 
         # A Hint PrintJSON only reaches the bridge when its own slot is involved (story 9.27);
