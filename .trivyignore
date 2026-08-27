@@ -1,0 +1,16 @@
+# Suppressions Trivy pour le scan d'image de docker-publish.yml.
+#
+# Le scan n'est pas encore bloquant sur ce dépôt (voir le commentaire du workflow) : ce fichier
+# existe pour que la bascule ne demande que de passer `exit-code` à 1, et pour que les exemptions
+# aient déjà leur forme le jour où elles compteront.
+#
+# Format : une CVE par ligne, avec une échéance et une raison.
+#
+#   CVE-2026-12345 exp:2026-09-30  # <pourquoi on l'accepte> - suivi dans #<issue>
+#
+# Règles :
+# - Toujours poser `exp:`. Une entrée sans échéance ne revient jamais en revue.
+# - Garder la fenêtre courte. L'échéance est une promesse de réexamen, pas une suppression.
+# - Dire pourquoi. "Non atteignable depuis notre code" est une affirmation que quelqu'un doit
+#   pouvoir revérifier quand l'entrée expire.
+# - Les CVE sans correctif n'ont rien à faire ici : `ignore-unfixed: true` les exclut déjà.
