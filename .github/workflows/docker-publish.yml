@@ -68,26 +68,24 @@ jobs:
           cache-from: type=gha,scope=${{ env.IMAGE }}
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE }}
 
-      # NON BLOQUANT POUR L'INSTANT, et c'est un choix daté, pas un oubli.
+      # Bloquant, et place avant le push pour qu'une image vulnerable ne soit jamais publiee.
+      # `ignore-unfixed: true` garde le gate honnete : il ne se declenche que sur des CVE sur
+      # lesquelles on peut agir.
       #
-      # Mesuré le 2026-08-28 sur l'image archipelago : 78 vulnérabilités corrigeables en
-      # HIGH/CRITICAL - 39 paquets Debian de l'image de base, 32 dans un binaire Go embarqué,
-      # 2 CRITICAL (grpc v1.62.1, stdlib Go v1.23.7) que ni un `apt-get upgrade` ni notre code ne
-      # peuvent corriger. Rendre le gate bloquant aujourd'hui empêcherait toute publication.
-      #
-      # Le rendre bloquant est suivi par une issue : c'est la seule façon d'éviter ce que le site a
-      # vécu (#518), où un `continue-on-error` a masqué 29 findings dont un CRITICAL sur plusieurs
-      # releases. Ici le scan tourne et son tableau est lisible dans le job ; il ne ment pas sur son
-      # statut. `.trivyignore` existe déjà pour que la bascule ne demande que de changer exit-code.
-      - name: Trivy scan (rapport)
+      # Il ne l'etait pas a la creation de ce workflow : l'image portait des vulnerabilites
+      # corrigeables et un gate aurait empeche toute publication. Elles ont ete traitees (montee des
+      # dependances, retrait des arbres vendores), l'image est a zero, et le gate ferme la porte
+      # derriere. L'echappatoire pour une publication urgente est une entree datee dans
+      # `.trivyignore`, pas un `continue-on-error` - c'est ce masquage global qui avait laisse passer
+      # 29 findings dont un CRITICAL cote site (#518).
+      - name: Trivy scan
         uses: aquasecurity/trivy-action@v0.36.0
-        continue-on-error: true
         with:
           image-ref: ${{ env.IMAGE }}:scan
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           format: table
-          exit-code: '0'
+          exit-code: '1'
           trivyignores: .trivyignore
 
       - name: Push

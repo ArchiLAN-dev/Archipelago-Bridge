@@ -16,6 +16,15 @@ WORKDIR /service
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# setuptools embarque ses propres copies de paquets sous `_vendor/`, et elles vieillissent : Trivy y
+# voit wheel 0.45.1 et jaraco.context 5.3.0 en HIGH alors que le site-packages porte des versions
+# saines. Ni pip ni la mise a jour de setuptools n'atteignent cet arbre - il n'est pas a nous.
+#
+# Le service tourne sur `python -m bridge.bridge` et n'a besoin ni de setuptools ni de wheel une
+# fois les dependances installees (verifie : l'import du module passe sans eux). On les retire
+# plutot que d'embarquer leurs CVE, comme l'image du frontend le fait pour l'arbre vendore de npm.
+RUN pip uninstall -y setuptools wheel
+
 # Copy repo contents into bridge/ subpackage so `python -m bridge.bridge` resolves
 COPY . bridge/
 
