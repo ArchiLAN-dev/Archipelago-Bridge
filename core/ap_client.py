@@ -249,7 +249,9 @@ def _build_feed_event(packet: dict[str, Any], store: DataPackageStore) -> dict[s
 
     # Goal events: attach the finishing player (AP sends only the slot number), so consumers can
     # place the completion on a per-player timeline without parsing the prose (story 32.12).
-    if msg_type == "goal":
+    # Release / collect / forfeit carry the same slot: the site excludes that slot from the stats when
+    # it had not reached its goal, whoever typed the command (story 32.14).
+    if msg_type in ("goal", "release", "collect", "forfeit"):
         slot = int(packet.get("slot", 0) or 0)
         if slot:
             event["sender"] = {"slot": slot, "name": store.resolve_player(slot), "game": store.slot_game(slot)}

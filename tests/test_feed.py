@@ -320,3 +320,28 @@ def test_goal_without_slot_has_no_sender() -> None:
 
     assert event["type"] == "goal"
     assert "sender" not in event
+
+
+# ---------------------------------------------------------------------------
+# Release / collect sender (story 32.14)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ap_type,expected,verb", [
+    ("Release", "release", "has released all remaining items from their world."),
+    ("Collect", "collect", "has collected their items from other worlds."),
+    ("Forfeit", "forfeit", "has forfeited."),
+])
+def test_release_and_collect_attach_the_player(ap_type: str, expected: str, verb: str) -> None:
+    # The site excludes that slot from the stats when it had not reached its goal: it must know which one,
+    # whether the admin or the player typed the command.
+    store = _two_world_store()
+    packet = {
+        "type": ap_type,
+        "slot": 2,
+        "team": 0,
+        "data": [{"type": "text", "text": f"Pierre (Team #1) {verb}"}],
+    }
+    event = _build_feed_event(packet, store)
+
+    assert event["type"] == expected
+    assert event["sender"] == {"slot": 2, "name": "Pierre", "game": "Wind Waker"}

@@ -829,6 +829,10 @@ One AP feed event.
 }
 ```
 
+`goal`, `release`, `collect` and `forfeit` events carry only `sender`: the player who finished, released,
+collected or forfeited (AP names them by slot). The central site uses it to leave a slot released before its
+goal out of the stats, whether the admin or the player typed the command (story 32.14).
+
 DeathLink feed event:
 ```jsonc
 {
