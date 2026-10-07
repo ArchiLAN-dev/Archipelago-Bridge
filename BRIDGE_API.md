@@ -604,10 +604,20 @@ reachability computation completes.
 }
 ```
 
+**202 - still computing** (story 17.28). The request waits 3 s at most: a warm daemon answers
+within it (200 above). Past it - the session daemon still rebuilding a big multiworld - the bridge
+does not hold the request: the computation goes on, and its result is pushed to the site
+(`reachable-push`, then Mercure) and broadcast (`reachable_changed`) once ready. `previous` is the
+slot's last result, stale, or `null` when it was never computed.
+```jsonc
+{ "computing": true, "previous": { /* same shape as the 200, "cached": true */ } }
+```
+
 ---
 
 #### `GET /slots/{slot}/item-locations`
-Where this slot's items are located across all other worlds.
+Where this slot's items are located across all other worlds. Never waits (story 17.28): the
+slots not computed yet are started and show up in a later answer.
 ```jsonc
 {
   "slot": 1,

@@ -15,7 +15,6 @@ from bridge.bridge import (
     StateManager,
     create_app,
 )
-from bridge.core import rest_reachable
 from bridge.core.ap_client import SelfHintOutcome
 
 
@@ -344,7 +343,7 @@ async def test_get_reachable_success() -> None:
 
     mock_result = {"player": "Tester", "counts": {"reachable_now": 5}, "cached": False}
 
-    with patch.object(rest_reachable, "_compute_reachable", new=AsyncMock(return_value=(mock_result, ""))):
+    with patch("bridge.core.reachable._compute_reachable", new=AsyncMock(return_value=(mock_result, ""))):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.get("/reachable/1")
             assert resp.status_code == 200
