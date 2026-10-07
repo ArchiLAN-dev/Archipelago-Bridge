@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .reachable import _compute_reachable, _reachable_cache
+from .reachable import ReachablePublisher, _compute_reachable, _reachable_cache
 from .save_parser import load_save_state_from_json
 from .state import StateManager
 
@@ -58,6 +58,36 @@ async def _push_reachable_to_api(
                 log.warning("reachable push: unexpected status %d for slot %d", resp.status_code, slot_id)
     except Exception as exc:
         log.warning("reachable push error slot %d: %s", slot_id, exc)
+
+
+def make_reachable_publisher(
+    state: StateManager,
+    broadcast: BroadcastFn,
+    session_id: str,
+    central_api_url: str = "",
+    central_api_secret: str = "",
+    notify_state_changed: Callable[[], Awaitable[None]] | None = None,
+) -> ReachablePublisher:
+    """What the sweep does with a fresh result, for one computed outside it (story 17.28): a page
+    asked, got « computing », and now gets the result through the push instead of waiting."""
+    log = logging.getLogger(__name__)
+
+    async def publish(slot_id: int, result: dict[str, Any]) -> None:
+        ps = state._states.get(slot_id)
+        reachable_now = result.get("counts", {}).get("reachable_now", 0)
+        changed = ps is not None and ps.reachable_now != reachable_now
+        if ps is not None:
+            ps.reachable_now = reachable_now
+        await broadcast("reachable_changed", {
+            "sessionId": session_id,
+            "slot": slot_id,
+            "reachableNow": reachable_now,
+        })
+        await _push_reachable_to_api(session_id, slot_id, result, central_api_url, central_api_secret, log)
+        if changed and notify_state_changed is not None:
+            await notify_state_changed()
+
+    return publish
 
 
 async def _reachable_sweep_loop(
@@ -120,6 +150,10 @@ async def _reachable_sweep_loop(
             # slots; push the `players` topic now so the progress grid updates
             # immediately, instead of waiting for the next WS-driven push.
             await notify_state_changed()
+
+        # Story 17.28: a run nobody played for a while gives its multiworld's memory back.
+        if runtime is not None and hasattr(runtime, "release_idle"):
+            await runtime.release_idle()
 
         try:
             await asyncio.wait_for(recompute_event.wait(), timeout=30.0)

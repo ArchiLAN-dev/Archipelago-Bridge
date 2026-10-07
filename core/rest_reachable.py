@@ -5,10 +5,11 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
 from .ap_client import ArchipelagoClient
 from .deps import get_ap_client, get_bridge_state, get_runtime, get_semaphore
-from .reachable import _compute_reachable, _reachable_cache
+from .reachable import _reachable_cache, start_reachable
 from .schemas import ItemLocationResponse, ItemLocationsResponse
 from .state import StateManager
 
@@ -23,18 +24,35 @@ _CHECK_STATUS: dict[str, str] = {
 
 router = APIRouter(tags=["Reachable"])
 
+# How long a reachability request waits before answering 202 « computing » (story 17.28): a warm
+# daemon answers within it, a daemon starting on a big multiworld does not hold the request.
+REACHABLE_GRACE_SECONDS = 3.0
 
-@router.get("/slots/{slot}/reachable")
-@router.get("/reachable/{slot}", include_in_schema=False)
+
+@router.get("/slots/{slot}/reachable", response_model=None)
+@router.get("/reachable/{slot}", include_in_schema=False, response_model=None)
 async def get_reachable(
     slot: int,
     state: StateManager = Depends(get_bridge_state),
     ap_client: ArchipelagoClient = Depends(get_ap_client),
     semaphore: asyncio.Semaphore = Depends(get_semaphore),
     runtime: Any = Depends(get_runtime),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     state.merge_state_from_save()
-    result, err_msg = await _compute_reachable(slot, state, semaphore, log, runtime)
+    # Story 17.28: a warm daemon answers within the grace; past it (a daemon starting on a big
+    # multiworld), the request does not wait - the result goes to the page through the push.
+    task = start_reachable(slot, state, semaphore, log, runtime)
+    try:
+        result, err_msg = await asyncio.wait_for(asyncio.shield(task), timeout=REACHABLE_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        previous = _reachable_cache.get(slot)
+        ps = state._states.get(slot)
+        payload = None
+        if previous is not None:
+            payload = {**previous[1], "cached": True}
+            if ps is not None and ps.slot_name:
+                payload["player"] = ps.slot_name
+        return JSONResponse({"computing": True, "previous": payload}, status_code=202)
 
     if result is None:
         status = 504 if "timed out" in err_msg else 500
@@ -65,21 +83,10 @@ async def get_item_locations(
 ) -> ItemLocationsResponse:
     state.merge_state_from_save()
 
-    # Ensure reachability is computed for slots not yet cached.
-    # Use a short timeout per slot to avoid blocking the whole request if Docker
-    # is slow (e.g. after bridge restart). Uncached slots are skipped gracefully;
-    # the sweep loop will warm the cache asynchronously.
-    for s in list(state._states.keys()):
-        if s not in _reachable_cache:
-            try:
-                await asyncio.wait_for(
-                    _compute_reachable(s, state, semaphore, log, runtime),
-                    timeout=8.0,
-                )
-            except asyncio.TimeoutError:
-                log.warning("item-locations: reachability timeout for slot %d, skipping", s)
-            except Exception as exc:
-                log.warning("item-locations: reachability error for slot %d: %s", s, exc)
+    # Story 17.28: never waits. The slots not computed yet are started (shared with the sweep);
+    # their checks show up in the next answer, once in the cache.
+    for s_missing in [s for s in list(state._states.keys()) if s not in _reachable_cache]:
+        start_reachable(s_missing, state, semaphore, log, runtime)
 
     locations: list[ItemLocationResponse] = []
     for sender_slot, (_, result) in _reachable_cache.items():

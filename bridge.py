@@ -22,8 +22,10 @@ from bridge.core.loops import (
     _api_heartbeat_loop,
     _reachable_sweep_loop,
     _ws_heartbeat_loop,
+    make_reachable_publisher,
     setup_logging,
 )
+from bridge.core.reachable import set_reachable_publisher
 from bridge.core.rest import create_app
 from bridge.core.save_parser import load_save_state, load_save_state_from_json
 from bridge.core.state import StateManager
@@ -95,6 +97,13 @@ async def _main() -> None:
     _uv_task = asyncio.create_task(uv_server.serve())
     log.info("REST+WS API listening on port %d", config.rest_port)
 
+    # Story 17.28: a computation a page started without waiting reaches it through the push.
+    set_reachable_publisher(make_reachable_publisher(
+        state, ws_server.broadcast, config.session_id,
+        central_api_url=config.central_api_url,
+        central_api_secret=config.central_api_secret,
+        notify_state_changed=ap_client.notify_state_changed,
+    ))
     _sweep_task = asyncio.create_task(
         _reachable_sweep_loop(
             state, ws_server.broadcast, config.session_id,

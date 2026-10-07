@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .state import StateManager
@@ -14,6 +15,21 @@ _reachable_cache: dict[int, tuple[tuple, dict]] = {}
 
 _reachable_daemons: dict[int, asyncio.subprocess.Process] = {}
 _daemon_ready_events: dict[int, asyncio.Event] = {}
+
+# The computation running for each slot, shared by every caller (story 17.28).
+_inflight: dict[int, asyncio.Task[tuple[dict | None, str]]] = {}
+
+OUT_OF_TURN = "reachable daemon answered out of turn"
+
+ReachablePublisher = Callable[[int, dict], Awaitable[None]]
+
+# Tells the site a computation that nobody waited for (story 17.28): set once by the bridge.
+_hooks: dict[str, ReachablePublisher | None] = {"publisher": None}
+
+
+def set_reachable_publisher(publisher: ReachablePublisher | None) -> None:
+    """Where a fresh result started outside the sweep goes once ready (broadcast, push to the site)."""
+    _hooks["publisher"] = publisher
 
 
 def _result_error(result: object) -> str | None:
@@ -24,9 +40,86 @@ def _result_error(result: object) -> str | None:
     hand it back as a successful reachability result (HTTP 200), and the cached error would stick
     until the slot's state changes. Surfacing it as (None, error) lets the caller raise properly.
     """
-    if isinstance(result, dict) and "error" in result:
+    if not isinstance(result, dict):
+        return "reachable.py answered something that is not a result"
+    if "error" in result:
         return str(result["error"])
+    if not isinstance(result.get("counts"), dict):
+        # Not a computation - typically the daemon's {"ready": true} line read as the answer to a
+        # request, the stream one line out of step (story 17.28). Cached, it would be served as
+        # the slot's reachability until its state changes.
+        return OUT_OF_TURN
     return None
+
+
+async def _compute_and_publish(
+    slot: int,
+    state: StateManager,
+    semaphore: asyncio.Semaphore,
+    log: logging.Logger,
+    runtime: Any = None,
+) -> tuple[dict | None, str]:
+    result, err = await _compute_reachable(slot, state, semaphore, log, runtime)
+    publisher = _hooks["publisher"]
+    if result is not None and not result.get("cached") and publisher is not None:
+        try:
+            await publisher(slot, result)
+        except Exception as exc:
+            log.warning("reachable: publishing slot=%d failed: %s", slot, exc)
+    return result, err
+
+
+def start_reachable(
+    slot: int,
+    state: StateManager,
+    semaphore: asyncio.Semaphore,
+    log: logging.Logger,
+    runtime: Any = None,
+) -> asyncio.Task[tuple[dict | None, str]]:
+    """The slot's computation, started now or joined if already running (story 17.28).
+
+    Nobody has to wait for it: once fresh, its result goes to the site through the publisher.
+    """
+    task = _inflight.get(slot)
+    if task is None or task.done():
+        task = asyncio.create_task(_compute_and_publish(slot, state, semaphore, log, runtime))
+        _inflight[slot] = task
+
+        def _forget(done: asyncio.Task[tuple[dict | None, str]], slot: int = slot) -> None:
+            if _inflight.get(slot) is done:
+                del _inflight[slot]
+
+        task.add_done_callback(_forget)
+    return task
+
+
+async def compute_reachable_shared(
+    slot: int,
+    state: StateManager,
+    semaphore: asyncio.Semaphore,
+    log: logging.Logger,
+    runtime: Any = None,
+) -> tuple[dict | None, str]:
+    """`start_reachable`, awaited. A caller that stops waiting (a timeout, a dropped request)
+    cancels only its own wait, never the computation: a daemon start cut short is lost work on a
+    big multiworld, and the next caller would start it from scratch again (story 17.28).
+    """
+    return await asyncio.shield(start_reachable(slot, state, semaphore, log, runtime))
+
+
+async def _reset_daemon(slot: int, runtime: Any, log: logging.Logger) -> None:
+    """Drop a slot's daemon whose answers came out of step, so the next compute starts a fresh one."""
+    log.warning("reachable: daemon out of step slot=%d - restarting it", slot)
+    if runtime is not None and hasattr(runtime, "reset_reachable"):
+        await runtime.reset_reachable(slot)
+        return
+    _daemon_ready_events.pop(slot, None)
+    proc = _reachable_daemons.pop(slot, None)
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 async def _start_daemon(slot: int, arch_file: str, log: logging.Logger) -> None:
@@ -100,6 +193,8 @@ async def _compute_reachable(
     log.info("reachable: running slot=%d cache_key=%s", slot, cache_key)
 
     state_payload = json.dumps({
+        # A session daemon answers for every slot: each request names its own (story 17.28).
+        "slot": slot,
         "checked_locations": list(ps._checked_locations) if ps else [],
         "received_items": list(ps._received_items) if ps else [],
     })
@@ -127,6 +222,8 @@ async def _compute_reachable(
                 return None, "invalid JSON from reachable.py"
             err = _result_error(result)
             if err is not None:
+                if err == OUT_OF_TURN:
+                    await _reset_daemon(slot, runtime, log)
                 return None, err
             _reachable_cache[slot] = (cache_key, result)
             log.info("reachable: docker slot=%d reachable=%d",
@@ -147,14 +244,21 @@ async def _compute_reachable(
                 result = json.loads(resp.decode())
                 err = _result_error(result)
                 if err is not None:
+                    if err == OUT_OF_TURN:
+                        await _reset_daemon(slot, None, log)
                     return None, err
                 _reachable_cache[slot] = (cache_key, result)
                 log.info("reachable: daemon slot=%d reachable=%d",
                          slot, result.get("counts", {}).get("reachable_now", 0))
                 return result, ""
+            except asyncio.CancelledError:
+                # The answer to this request would be read as the answer to the next one.
+                await _reset_daemon(slot, None, log)
+                raise
             except Exception as exc:
                 log.warning("reachable: daemon failed slot=%d %s - subprocess fallback", slot, exc)
-                _daemon_ready_events.pop(slot, None)
+                # Its stream is out of step now: a fresh daemon starts below.
+                await _reset_daemon(slot, None, log)
 
         existing = _reachable_daemons.get(slot)
         if existing is None or existing.returncode is not None:

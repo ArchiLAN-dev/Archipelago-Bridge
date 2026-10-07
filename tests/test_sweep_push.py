@@ -72,3 +72,29 @@ async def test_sweep_no_push_when_nothing_to_compute(
     await _run_sweep_once(state, notify, monkeypatch)
 
     notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_result_computed_outside_the_sweep_reaches_the_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 17.28: a page got « computing »; once ready, its result is broadcast and pushed,
+    and the progress grid refreshed when reachable_now moved."""
+    state = StateManager()
+    ps = state.ensure_slot(2)
+    ps.reachable_now = 1
+    broadcast = AsyncMock()
+    notify = AsyncMock()
+    push = AsyncMock()
+    monkeypatch.setattr(loops, "_push_reachable_to_api", push)
+    publish = loops.make_reachable_publisher(state, broadcast, "run-1", "http://api", "secret", notify)
+
+    await publish(2, {"counts": {"reachable_now": 5}})
+
+    assert ps.reachable_now == 5
+    broadcast.assert_awaited_once_with("reachable_changed", {"sessionId": "run-1", "slot": 2, "reachableNow": 5})
+    push.assert_awaited_once()
+    notify.assert_awaited_once()
+
+    await publish(2, {"counts": {"reachable_now": 5}})
+    assert notify.await_count == 1, "no grid refresh when nothing moved"
