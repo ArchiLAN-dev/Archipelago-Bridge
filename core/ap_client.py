@@ -378,7 +378,8 @@ class ArchipelagoClient:
 
     def get_players_state(self) -> dict[str, Any]:
         """`to_api_dict` enriched with per-slot `game` and `slot_type`, so consumers can tell real
-        players from the injected TextOnly "Bridge" observer slot (game "Archipelago"). Refreshes from
+        players from item-link groups (and, on a multiworld generated before story 9.56, from its injected
+        "Bridge" observer slot, game "Archipelago"). Refreshes from
         the apsave first, like the legacy GET /state did inline."""
         self._state.merge_state_from_save()
         data = self._state.to_api_dict()
@@ -456,8 +457,8 @@ class ArchipelagoClient:
     async def run_self_hint(self, slot: int, command: str, *, timeout: float = 15.0) -> SelfHintOutcome:
         """Open a throwaway connection AS ``slot`` and run a paid self-hint, charging that slot.
 
-        The main bridge connection is the TextOnly "Bridge" slot, so a self-hint there resolves
-        against (and would charge) the Bridge slot. To charge slot N - exactly as if the player
+        The main bridge connection sits on the roster's first slot (story 9.56), so a self-hint there would
+        resolve against (and charge) that slot. To charge slot N - exactly as if the player
         typed ``!hint <item>`` / ``!hint_location <location>`` in their own client - we open a
         second WebSocket, ``Connect`` as slot N using the **server (room) password** (never the
         admin password, never ``!admin login``), send the single ``Say``, read the authoritative
@@ -508,8 +509,8 @@ class ArchipelagoClient:
         data storage (and reaches the player's real client / text launcher).
 
         AP only lets a hint's *receiving* or *finding* player change its status; the main bridge
-        connection is the TextOnly "Bridge" slot and has no such permission - sending UpdateHint
-        there is silently ignored by the server. So, exactly like the paid self-hint (story 9.30),
+        connection sits on the roster's first slot (story 9.56) and must never act for a player - it is not
+        used for hints at all. So, exactly like the paid self-hint (story 9.30),
         we open a throwaway connection AS ``slot`` (which is the receiving or finding player of the
         hint shown on its page). ``player`` in the packet is the hint's receiving player. AP closes
         the socket cleanly, flushing the packet, so the change is persisted server-side.
@@ -687,11 +688,11 @@ class ArchipelagoClient:
             if games_in_session:
                 await ws.send(json.dumps([{"cmd": "GetDataPackage", "games": games_in_session}]))
 
-            first_slot = self._config.slot_names[0] if self._config.slot_names else {}
-            # "Bridge" slot is injected by the orchestrateur into every session's yamls,
-            # giving the bridge a TextOnly observer slot in the generated multiworld.
-            connect_name = first_slot.get("name", "Bridge")
-            connect_game = first_slot.get("game", "Archipelago")
+            # Story 9.56: the bridge attaches to the first slot of the roster (TextOnly, so it never counts as
+            # playing it). A multiworld generated before still lists its "Bridge" observer first.
+            first_slot = self._config.slot_names[0]
+            connect_name = first_slot.get("name", "")
+            connect_game = first_slot.get("game", "")
 
             connect_packet = {
                 "cmd": "Connect",
@@ -1475,6 +1476,11 @@ class ArchipelagoClient:
     # ------------------------------------------------------------------
 
     async def run_with_reconnect(self) -> None:
+        # Story 9.56: no default slot any more. An empty roster is a launch misconfiguration: say so and track
+        # nothing, rather than attach to a slot that does not exist.
+        if not self._config.slot_names:
+            self._log.error("SLOT_NAMES is empty: no slot to attach to, the session is not tracked")
+            return
         retry_idx = 0
         while True:
             try:
