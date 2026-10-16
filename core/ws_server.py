@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .commands import slot_acting_command
 from .config import Config
 
 if TYPE_CHECKING:
@@ -139,6 +140,12 @@ class WsServer:
         if ap is None or not ap.ws_connected:
             if cmd_id:
                 await ws.send_text(json.dumps({"type": "error", "id": cmd_id, "code": "ws_disconnected"}))
+            return
+
+        # Story 9.56: the permanent connection is a real player's slot - never act on it from the console.
+        if slot_acting_command(text) is not None:
+            if cmd_id:
+                await ws.send_text(json.dumps({"type": "error", "id": cmd_id, "code": "slot_command_refused"}))
             return
 
         await ap.send_command(text)

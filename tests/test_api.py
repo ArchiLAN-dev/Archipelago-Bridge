@@ -128,10 +128,27 @@ async def test_post_command_valid() -> None:
     ap_client._ws.send = AsyncMock()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/commands", json={"command": "!hint Alice"})
+        resp = await client.post("/commands", json={"command": "!players"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_command_refuses_what_would_act_as_the_connected_player() -> None:
+    # Story 9.56: the permanent connection sits on a real player's slot.
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client._ws = AsyncMock()
+    ap_client._ws.send = AsyncMock()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for command in ("!hint Master Sword", "!release", "!collect", "!alias Bob", "!getitem Bomb"):
+            resp = await client.post("/commands", json={"command": command})
+            assert resp.status_code == 422, command
+        resp = await client.post("/commands", json={"command": "!admin /hint Alice Master Sword"})
+        assert resp.status_code == 200
+    ap_client._ws.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
