@@ -637,6 +637,11 @@ class ArchipelagoClient:
     #: sits on a real player's.
     _NON_PLAYING_TAGS = frozenset({"TextOnly", "Tracker", "HintGame"})
 
+    #: The bridge's own tags on its main connection. DeathLink because the server only bounces a death to
+    #: clients carrying the tag (story 32.25); TextOnly still keeps the bridge out of presence and out of
+    #: the DeathLink badge, and it never sends a death of its own.
+    CONNECT_TAGS = ("TextOnly", "DeathLink")
+
     @property
     def _connected_slots(self) -> set[int]:
         """Slots a real game client is currently holding."""
@@ -742,7 +747,7 @@ class ArchipelagoClient:
                 "password": self._config.ap_server_password,
                 "uuid": str(uuid.uuid4()),
                 "version": {"major": 0, "minor": 6, "build": 7, "class": "Version"},
-                "tags": ["TextOnly"],
+                "tags": list(self.CONNECT_TAGS),
                 "items_handling": 0,
                 "slot_data": False,
             }
@@ -1003,7 +1008,33 @@ class ArchipelagoClient:
             "cause": cause if isinstance(cause, str) else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        # Story 32.25: who died, as the other feed lines name a slot, and who probably died with them -
+        # the slots a DeathLink client plays right now (story 9.59).
+        dead = self._slot_of_death_source(source)
+        if dead:
+            death_event["sender"] = {
+                "slot": dead,
+                "name": self._store.resolve_player(dead),
+                "game": self._store.slot_game(dead),
+            }
+        death_event["victims"] = sorted(
+            self._store.resolve_player(slot)
+            for slot, ps in self._state.get_all().items()
+            if slot != dead and ps.death_link_live is True
+        )
         await self._emit_feed(death_event)
+
+    def _slot_of_death_source(self, source: str) -> int:
+        """The slot a DeathLink `source` names: clients send the player's alias, some the slot name."""
+        if not source:
+            return 0
+        slot = self._store.slot_by_alias(source)
+        if slot:
+            return slot
+        for candidate, name in self._store._slot_names.items():
+            if name == source:
+                return candidate
+        return 0
 
     async def _emit_feed(self, event: dict[str, Any]) -> None:
         """Record one feed event, broadcast it to local WS clients, and push it to Symfony so it can

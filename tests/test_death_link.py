@@ -175,3 +175,69 @@ def test_loading_the_spoiler_sets_each_slot_setting(tmp_path: Path) -> None:
 
     slots = state.to_api_dict()["slots"]
     assert [slots[k]["death_link_option"] for k in ("1", "2", "3")] == [True, False, True]
+
+
+# ── Story 32.25: the deaths themselves ────────────────────────────────────────
+
+
+def test_the_bridge_carries_the_death_link_tag_but_stays_text_only() -> None:
+    """The server only bounces a death to clients with the tag; TextOnly keeps the bridge out of presence."""
+    assert set(ArchipelagoClient.CONNECT_TAGS) == {"TextOnly", "DeathLink"}
+    assert not ArchipelagoClient._is_playing_client(list(ArchipelagoClient.CONNECT_TAGS))
+
+
+def _roster(ap: ArchipelagoClient) -> None:
+    ap._store.handle_connected({
+        "players": [{"slot": 1, "alias": "Alice"}, {"slot": 2, "alias": "Bob"}, {"slot": 3, "alias": "Carol"}],
+        "slot_info": {"1": {"name": "alice_slot", "game": "Celeste"}, "2": {"name": "Bob", "game": "Hollow Knight"},
+                      "3": {"name": "Carol", "game": "Terraria"}},
+    })
+
+
+async def _death(ap: ArchipelagoClient, source: str) -> dict[str, object]:
+    ap._emit_feed = AsyncMock()  # type: ignore[method-assign]
+    await ap._handle_bounced({"cmd": "Bounced", "tags": ["DeathLink"], "data": {"source": source, "cause": "Spikes"}})
+    event: dict[str, object] = ap._emit_feed.await_args.args[0]
+    return event
+
+
+@pytest.mark.asyncio
+async def test_a_death_names_its_slot_and_its_probable_victims() -> None:
+    ap = _client()
+    _roster(ap)
+    await _print(ap, "Join", 1, ["AP", "DeathLink"])
+    await _print(ap, "Join", 2, ["AP", "DeathLink"])
+    await _print(ap, "Join", 3, ["AP"])
+
+    event = await _death(ap, "Alice")
+
+    assert event["type"] == "death_link"
+    assert event["source"] == "Alice"
+    assert event["cause"] == "Spikes"
+    assert event["sender"] == {"slot": 1, "name": "Alice", "game": "Celeste"}
+    # Carol plays without DeathLink, Alice is the one who died.
+    assert event["victims"] == ["Bob"]
+
+
+@pytest.mark.asyncio
+async def test_a_source_given_as_the_slot_name_is_resolved_too() -> None:
+    ap = _client()
+    _roster(ap)
+
+    event = await _death(ap, "alice_slot")
+
+    assert event["sender"] == {"slot": 1, "name": "Alice", "game": "Celeste"}
+    assert event["victims"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_source_keeps_the_death_without_a_slot() -> None:
+    """The admin's POST /deathlink, or a client naming itself oddly."""
+    ap = _client()
+    _roster(ap)
+    await _print(ap, "Join", 2, ["AP", "DeathLink"])
+
+    event = await _death(ap, "ArchiLAN")
+
+    assert "sender" not in event
+    assert event["victims"] == ["Bob"]
