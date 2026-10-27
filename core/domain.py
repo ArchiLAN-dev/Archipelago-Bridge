@@ -70,6 +70,10 @@ class PlayerState:
     # Authoritative hint points read from AP (Connected.hint_points) via a connect-as-slot probe.
     # None until queried; when set it overrides the local estimate (AP is the source of truth).
     hint_points_reported: int | None = None
+    # DeathLink (story 9.59): live from the connected clients' tags (None while nobody plays the slot),
+    # and the setting the seed was generated with (None when the spoiler does not say).
+    death_link_live: bool | None = None
+    death_link_option: bool | None = None
     _checked_locations: set[int] = field(default_factory=set, repr=False)
     _received_items: list[tuple[int, int, int]] = field(default_factory=list, repr=False)
     _hints: list[HintInfo] = field(default_factory=list, repr=False)
@@ -92,4 +96,6 @@ class PlayerState:
             "reachable_now": self.reachable_now,
             "hints_used": self.hints_used,
             "hint_points_available": self.hint_points_available,
+            "death_link_live": self.death_link_live,
+            "death_link_option": self.death_link_option,
         }
