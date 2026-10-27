@@ -227,8 +227,17 @@ async def _ws_heartbeat_loop(broadcast: BroadcastFn, session_id: str) -> None:
             log.warning("heartbeat broadcast error: %s", exc)
 
 
-async def _api_heartbeat_loop(session_id: str, central_api_url: str, central_api_secret: str) -> None:
-    """Call the Symfony heartbeat endpoint every 30 s to keep lastHeartbeatAt fresh."""
+async def _api_heartbeat_loop(
+    session_id: str,
+    central_api_url: str,
+    central_api_secret: str,
+    presence: Callable[[], list[dict[str, Any]]] | None = None,
+) -> None:
+    """Call the Symfony heartbeat endpoint every 30 s to keep lastHeartbeatAt fresh.
+
+    The body names the slots a game client holds right now (story 32.26): Symfony counts play time
+    from it, a span growing as long as the heartbeats keep naming the slot.
+    """
     if not central_api_url or not central_api_secret:
         return
     log = logging.getLogger(__name__)
@@ -238,7 +247,8 @@ async def _api_heartbeat_loop(session_id: str, central_api_url: str, central_api
         while True:
             await asyncio.sleep(30)
             try:
-                resp = await client.post(url, headers=headers)
+                body = {"connected_slots": presence() if presence is not None else []}
+                resp = await client.post(url, headers=headers, json=body)
                 if resp.status_code not in (200, 204):
                     log.warning("api heartbeat: unexpected status %d", resp.status_code)
             except Exception as exc:
