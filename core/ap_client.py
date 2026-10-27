@@ -329,6 +329,10 @@ class ArchipelagoClient:
         # A count rather than a set, because a slot can carry several clients at once - a co-op
         # game with two players on one world, or a player with a tracker open beside their game.
         self._playing_clients: dict[int, int] = {}
+        # The tags of each playing client on a slot, oldest first (story 9.59): what tells whether the
+        # slot plays with DeathLink right now. Part carries no tags, so the entries only line up with
+        # the clients when a slot has one, which is the common case.
+        self._slot_client_tags: dict[int, list[frozenset[str]]] = {}
 
         # Seed metadata
         self._seed_name: str = ""
@@ -647,6 +651,7 @@ class ArchipelagoClient:
         if not slot or not self._is_playing_client(tags):
             return False
         self._playing_clients[slot] = self._playing_clients.get(slot, 0) + 1
+        self._slot_client_tags.setdefault(slot, []).append(frozenset(tags))
         return self._playing_clients[slot] == 1
 
     def _client_left(self, slot: int, tags: list[str]) -> bool:
@@ -655,7 +660,44 @@ class ArchipelagoClient:
             return False
         remaining = max(0, self._playing_clients.get(slot, 0) - 1)
         self._playing_clients[slot] = remaining
+        entries = self._slot_client_tags.get(slot, [])
+        if remaining == 0:
+            entries.clear()
+        elif entries:
+            # Part does not say which client left: assume the latest one, a tracker or a second
+            # window opened after the game.
+            entries.pop()
         return remaining == 0
+
+    def _client_tags_changed(self, slot: int, tags: list[str]) -> None:
+        """A client changed its tags mid-game (ConnectUpdate, sent as a TagsChanged PrintJSON).
+
+        With several clients on the slot, the one that changed is the entry that differs from the new
+        tags by DeathLink alone, else the latest. A client unknown to the bridge (it joined before the
+        bridge attached) is not added: presence only counts what it saw join.
+        """
+        entries = self._slot_client_tags.get(slot)
+        if not slot or not entries or not self._is_playing_client(tags):
+            return
+        new = frozenset(tags)
+        index = len(entries) - 1
+        for i, entry in enumerate(entries):
+            if entry ^ new == {"DeathLink"}:
+                index = i
+                break
+        entries[index] = new
+
+    def _refresh_death_link(self, slot: int) -> bool:
+        """Copy the slot's live DeathLink onto its state; True when it changed."""
+        if not slot:
+            return False
+        entries = self._slot_client_tags.get(slot, [])
+        live = any("DeathLink" in entry for entry in entries) if entries else None
+        ps = self._state.ensure_slot(slot)
+        if ps.death_link_live == live:
+            return False
+        ps.death_link_live = live
+        return True
 
     # ------------------------------------------------------------------
     # Connection loop
@@ -881,10 +923,21 @@ class ArchipelagoClient:
             await self._track_hint(packet)
             state_changed = True
         elif msg_type == "Join":
-            if self._client_joined(int(packet.get("slot", 0)), packet.get("tags", [])):
+            slot = int(packet.get("slot", 0))
+            if self._client_joined(slot, packet.get("tags", [])):
+                state_changed = True
+            if self._refresh_death_link(slot):
                 state_changed = True
         elif msg_type == "Part":
-            if self._client_left(int(packet.get("slot", 0)), packet.get("tags", [])):
+            slot = int(packet.get("slot", 0))
+            if self._client_left(slot, packet.get("tags", [])):
+                state_changed = True
+            if self._refresh_death_link(slot):
+                state_changed = True
+        elif msg_type == "TagsChanged":
+            slot = int(packet.get("slot", 0))
+            self._client_tags_changed(slot, packet.get("tags", []))
+            if self._refresh_death_link(slot):
                 state_changed = True
 
         # A Hint PrintJSON only reaches the bridge when its own slot is involved (story 9.27);
@@ -1158,6 +1211,9 @@ class ArchipelagoClient:
                 self._log.warning("spoiler: failed to read %s: %s", zip_path, exc)
                 continue
 
+            for slot, enabled in self.death_link_options(text).items():
+                self._state.ensure_slot(slot).death_link_option = enabled
+
             count = 0
             for line in text.splitlines():
                 m = pattern.match(line.strip())
@@ -1183,6 +1239,31 @@ class ArchipelagoClient:
         self._placements = placements
         if not total_count:
             self._log.warning("spoiler: no placements resolved (player name mismatch?)")
+
+    _DEATH_LINK_OFF = frozenset({"no", "off", "false", "disabled", "0", "none"})
+
+    @classmethod
+    def death_link_options(cls, spoiler: str) -> dict[int, bool]:
+        """Each player's DeathLink setting from the spoiler header (story 9.59).
+
+        The header lists a player's options under their display name, `Death Link:  Yes` for the
+        common option; a world may use its own label (`DeathLink`) or a choice (`Receive Only`). A
+        one-player seed has no `Player N:` line, its options belong to slot 1.
+        """
+        result: dict[int, bool] = {}
+        player = 1
+        for raw in spoiler.splitlines():
+            line = raw.strip()
+            header = re.match(r"^Player (\d+): ", line)
+            if header:
+                player = int(header.group(1))
+                continue
+            label, sep, value = line.partition(":")
+            if not sep or "(" in label or player in result:
+                continue
+            if re.sub(r"[\s_-]", "", label).lower() == "deathlink" and value.strip():
+                result[player] = value.strip().lower() not in cls._DEATH_LINK_OFF
+        return result
 
     def get_placement(self, finder_slot: int, location_id: int) -> tuple[int, int] | None:
         """Return (item_id, receiver_slot) for a location, or None if unknown."""
