@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import collections
 import glob as _glob
@@ -333,6 +334,10 @@ class ArchipelagoClient:
         # slot plays with DeathLink right now. Part carries no tags, so the entries only line up with
         # the clients when a slot has one, which is the common case.
         self._slot_client_tags: dict[int, list[frozenset[str]]] = {}
+        # Slots counted as held on the server's word alone (story 32.26): after a (re)connection the
+        # clients already there send no Join, so `_read_client_status` stands in for them until the
+        # slot's next Join or Part says who is really there.
+        self._provisional_slots: set[int] = set()
 
         # Seed metadata
         self._seed_name: str = ""
@@ -651,10 +656,118 @@ class ArchipelagoClient:
     def _is_playing_client(cls, tags: list[str]) -> bool:
         return not any(tag in cls._NON_PLAYING_TAGS for tag in tags)
 
+    #: Server-side slot statuses a game client sets (StatusUpdate); a tracker alone leaves the slot at
+    #: CLIENT_CONNECTED (5), and CLIENT_GOAL (30) stays even once everybody has left.
+    _PLAYING_STATUSES = frozenset({10, 20})
+
+    #: What a Part says of the client that left, when its tag list cannot be read (`on_client_left`).
+    _PART_VERBS: tuple[tuple[str, list[str]], ...] = (
+        ("has stopped tracking", ["Tracker"]),
+        ("has stopped viewing", ["TextOnly"]),
+        ("has stopped hinting", ["HintGame"]),
+        ("has left the game", []),
+    )
+
+    @classmethod
+    def _part_tags(cls, packet: dict[str, Any]) -> list[str]:
+        """The tags of the client a Part announces (story 32.26).
+
+        The packet has no `tags` field, but its text ends with the client's tag list
+        (`Client(0.6.7), ['Tracker'].`) and its verb tells a game client from the others. An unreadable
+        text reads as a game client, which is what every Part counted as before.
+        """
+        text = cls._print_json_text(packet)
+        match = re.search(r"Client\([^)]*\), (\[.*\])\.?\s*$", text)
+        if match is not None:
+            try:
+                tags = ast.literal_eval(match.group(1))
+            except (ValueError, SyntaxError):
+                tags = None
+            if isinstance(tags, list) and all(isinstance(tag, str) for tag in tags):
+                return tags
+        for verb, tags_for_verb in cls._PART_VERBS:
+            if verb in text:
+                return list(tags_for_verb)
+        return []
+
+    def _reset_presence(self) -> bool:
+        """Forget every client: a new connection to the AP server re-learns them (story 32.26).
+
+        True when something was known (a state change to broadcast).
+        """
+        changed = bool(self._connected_slots)
+        self._playing_clients.clear()
+        self._slot_client_tags.clear()
+        self._provisional_slots.clear()
+        for ps in self._state.get_all().values():
+            if ps.death_link_live is not None:
+                ps.death_link_live = None
+                changed = True
+        return changed
+
+    def _client_status_key(self, slot: int) -> str:
+        return f"_read_client_status_{self._team}_{slot}"
+
+    def _slot_from_client_status_key(self, key: str) -> int | None:
+        prefix = f"_read_client_status_{self._team}_"
+        if not key.startswith(prefix):
+            return None
+        try:
+            return int(key[len(prefix):])
+        except ValueError:
+            return None
+
+    def _apply_server_client_status(self, slot: int, status: Any) -> bool:
+        """Line presence up with the server's own view of a slot (story 32.26); True when it changed.
+
+        0 means no client at all is left on the slot: the server is right, whatever the count says. A
+        game status on a slot nobody is known to hold marks it held, provisionally. The bridge's own
+        slot is skipped: its status is the bridge's own connection.
+        """
+        if not slot or slot == self._my_slot:
+            return False
+        try:
+            value = int(status or 0)
+        except (TypeError, ValueError):
+            return False
+        held = self._playing_clients.get(slot, 0) > 0
+        if value == 0:
+            self._provisional_slots.discard(slot)
+            if not held and not self._slot_client_tags.get(slot):
+                return False
+            self._playing_clients[slot] = 0
+            self._slot_client_tags.pop(slot, None)
+            self._refresh_death_link(slot)
+            return held
+        if value in self._PLAYING_STATUSES and not held:
+            self._playing_clients[slot] = 1
+            self._provisional_slots.add(slot)
+            return True
+        return False
+
+    def heartbeat_presence(self) -> list[dict[str, Any]]:
+        """The slots a game client holds, for the API heartbeat (story 32.26).
+
+        Named by their registered name (`session_slot.slot_name`), not the display alias. Empty while
+        the AP connection is down: nothing is known to be played then.
+        """
+        if not self.ws_connected:
+            return []
+        slots = []
+        for slot in sorted(self._connected_slots):
+            name = self._store.slot_name(slot)
+            if name:
+                slots.append({"slot": slot, "name": name})
+        return slots
+
     def _client_joined(self, slot: int, tags: list[str]) -> bool:
         """True when this join changed presence."""
         if not slot or not self._is_playing_client(tags):
             return False
+        if slot in self._provisional_slots:
+            # The server's word stood in for unknown clients; a real join replaces it.
+            self._provisional_slots.discard(slot)
+            self._playing_clients[slot] = 0
         self._playing_clients[slot] = self._playing_clients.get(slot, 0) + 1
         self._slot_client_tags.setdefault(slot, []).append(frozenset(tags))
         return self._playing_clients[slot] == 1
@@ -663,15 +776,25 @@ class ArchipelagoClient:
         """True when this part changed presence."""
         if not slot or not self._is_playing_client(tags):
             return False
-        remaining = max(0, self._playing_clients.get(slot, 0) - 1)
+        if slot in self._provisional_slots:
+            self._provisional_slots.discard(slot)
+            remaining = 0
+        else:
+            remaining = max(0, self._playing_clients.get(slot, 0) - 1)
         self._playing_clients[slot] = remaining
         entries = self._slot_client_tags.get(slot, [])
         if remaining == 0:
             entries.clear()
         elif entries:
-            # Part does not say which client left: assume the latest one, a tracker or a second
-            # window opened after the game.
-            entries.pop()
+            # The entry carrying the leaving client's tags, else the latest one (a tracker or a second
+            # window opened after the game).
+            left = frozenset(tags)
+            if left in entries:
+                entries.reverse()
+                entries.remove(left)
+                entries.reverse()
+            else:
+                entries.pop()
         return remaining == 0
 
     def _client_tags_changed(self, slot: int, tags: list[str]) -> None:
@@ -710,6 +833,10 @@ class ArchipelagoClient:
 
     async def _connect_and_run(self) -> None:
         async with websockets.connect(self._config.ap_ws_url, max_size=_WS_MAX_SIZE) as ws:
+            # The clients seen on a previous connection may be gone (server restarted) or will
+            # announce themselves again: start from nobody, then resync (story 32.26).
+            if self._reset_presence():
+                await self._broadcast_state_changed()
             self._ws = ws
             self.ws_connected = True
             self._log.info("connected to archipelago ws at %s", self._config.ap_ws_url)
@@ -837,16 +964,25 @@ class ArchipelagoClient:
             if "_read_race_mode" in keys:
                 self._race_mode = bool(keys["_read_race_mode"])
                 self._log.info("race_mode: %s", self._race_mode)
+            presence_changed = False
             for key, value in keys.items():
                 hint_slot = self._slot_from_hint_key(key)
                 if hint_slot is not None:
                     await self._ingest_hint_storage(hint_slot, value)
+                status_slot = self._slot_from_client_status_key(key)
+                if status_slot is not None and self._apply_server_client_status(status_slot, value):
+                    presence_changed = True
+            if presence_changed:
+                await self._broadcast_state_changed()
 
         elif cmd == "SetReply":
             hint_slot = self._slot_from_hint_key(str(packet.get("key", "")))
             if hint_slot is not None:
                 # Live change: a hint never seen before is also announced on the feed.
                 await self._ingest_hint_storage(hint_slot, packet.get("value"), announce=True)
+            status_slot = self._slot_from_client_status_key(str(packet.get("key", "")))
+            if status_slot is not None and self._apply_server_client_status(status_slot, packet.get("value")):
+                await self._broadcast_state_changed()
 
         elif cmd == "Bounced":
             await self._handle_bounced(packet)
@@ -904,11 +1040,14 @@ class ArchipelagoClient:
         # Subscribe to every slot's hint storage so hints for ALL slots arrive live -
         # the Hint PrintJSON is only sent to the slots involved, and the bridge connects
         # as a single slot, so it would otherwise miss hints between other slots (story 9.27).
+        # The clients' statuses too: the clients already connected send no Join, and the server's
+        # status is what tells a slot nobody holds any more (story 32.26).
         if self._ws is not None:
             hint_keys = [self._hint_storage_key(int(s)) for s in slot_info]
-            await self._ws.send(json.dumps([{"cmd": "Get", "keys": ["_read_race_mode", *hint_keys]}]))
+            status_keys = [self._client_status_key(int(s)) for s in slot_info]
+            await self._ws.send(json.dumps([{"cmd": "Get", "keys": ["_read_race_mode", *hint_keys, *status_keys]}]))
             if hint_keys:
-                await self._ws.send(json.dumps([{"cmd": "SetNotify", "keys": hint_keys}]))
+                await self._ws.send(json.dumps([{"cmd": "SetNotify", "keys": [*hint_keys, *status_keys]}]))
 
         await self._broadcast_state_changed()
 
@@ -935,7 +1074,7 @@ class ArchipelagoClient:
                 state_changed = True
         elif msg_type == "Part":
             slot = int(packet.get("slot", 0))
-            if self._client_left(slot, packet.get("tags", [])):
+            if self._client_left(slot, self._part_tags(packet)):
                 state_changed = True
             if self._refresh_death_link(slot):
                 state_changed = True
@@ -1586,6 +1725,14 @@ class ArchipelagoClient:
     # Reconnect loop
     # ------------------------------------------------------------------
 
+    async def _forget_presence_after_disconnect(self) -> None:
+        """Nobody is known to play while the AP server is out of reach (story 32.26)."""
+        try:
+            if self._reset_presence():
+                await self._broadcast_state_changed()
+        except Exception as exc:
+            self._log.warning("presence reset broadcast error: %s", exc)
+
     async def run_with_reconnect(self) -> None:
         retry_idx = 0
         while True:
@@ -1593,12 +1740,14 @@ class ArchipelagoClient:
                 await self._connect_and_run()
                 self.ws_connected = False
                 self._ws = None
+                await self._forget_presence_after_disconnect()
                 retry_idx = 0
                 self._log.info("ws connection closed cleanly, reconnecting in 5s")
                 await asyncio.sleep(5)
             except Exception as exc:
                 self.ws_connected = False
                 self._ws = None
+                await self._forget_presence_after_disconnect()
                 delay = _WS_RETRY_DELAYS[min(retry_idx, len(_WS_RETRY_DELAYS) - 1)]
                 self._log.warning("ws disconnected (%s), reconnecting in %ds", exc, delay)
                 retry_idx += 1

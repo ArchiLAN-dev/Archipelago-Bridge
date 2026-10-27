@@ -125,7 +125,10 @@ async def _main() -> None:
         _ws_heartbeat_loop(ws_server.broadcast, config.session_id)
     )
     _api_heartbeat_task = asyncio.create_task(
-        _api_heartbeat_loop(config.session_id, config.central_api_url, config.central_api_secret)
+        _api_heartbeat_loop(
+            config.session_id, config.central_api_url, config.central_api_secret,
+            presence=ap_client.heartbeat_presence,
+        )
     )
 
     try:
