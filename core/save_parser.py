@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import builtins
+import collections
 import glob
+import importlib
+import io
 import json
 import logging
 import os
@@ -11,6 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .domain import HintInfo, PlayerState
+
+_SAFE_BUILTINS = frozenset({"set", "frozenset"})
+_SAFE_NET_UTILS = frozenset({"NetworkItem", "ClientStatus", "Hint", "SlotType", "NetworkSlot", "HintStatus"})
 
 
 def _save_slot_map(mapping: dict[Any, Any]) -> dict[int, Any]:
@@ -126,6 +133,23 @@ def load_save_state_from_json(json_str: str) -> dict[int, PlayerState]:
         return {}
 
 
+class _SaveUnpickler(pickle.Unpickler):
+    """Only what an Archipelago save holds: the allowlist of ``Utils.restricted_loads``.
+
+    The save directory also receives imported archives, so an ``.apsave`` can come from a member,
+    and plain pickle runs code while loading. This process holds the Docker socket.
+    """
+
+    def find_class(self, module: str, name: str) -> Any:  # noqa: ANN401 - pickle's own signature
+        if module == "builtins" and name in _SAFE_BUILTINS:
+            return getattr(builtins, name)
+        if module == "collections" and name == "Counter":
+            return collections.Counter
+        if module == "NetUtils" and name in _SAFE_NET_UTILS:
+            return getattr(importlib.import_module("NetUtils"), name)
+        raise pickle.UnpicklingError(f"forbidden global in save: {module}.{name}")
+
+
 def load_save_state(save_dir: str) -> dict[int, PlayerState]:
     """Read latest .apsave file and return initial PlayerState per slot index."""
     _ap_src = "/app/ArchipelagoSrc"
@@ -140,7 +164,7 @@ def load_save_state(save_dir: str) -> dict[int, PlayerState]:
         latest = max(files, key=os.path.getmtime)
         with open(latest, "rb") as fh:
             raw = fh.read()
-        data: dict[str, Any] = pickle.loads(zlib.decompress(raw))  # noqa: S301
+        data: dict[str, Any] = _SaveUnpickler(io.BytesIO(zlib.decompress(raw))).load()
 
         log.info("save keys: %s", list(data.keys()))
         raw_cgs = data.get("client_game_state", {})

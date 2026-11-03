@@ -251,3 +251,28 @@ def test_other_teams_are_ignored(tmp_path: Path) -> None:
 
     assert result[6].checks_done == 1
     assert result[6].items_received == 1
+
+
+class _Exploit:
+    """Pickles into a call of ``pathlib.Path.touch``: what a forged save would run on load."""
+
+    def __init__(self, marker: Path) -> None:
+        self.marker = marker
+
+    def __reduce__(self) -> tuple[object, tuple[Path]]:
+        return (Path.touch, (self.marker,))
+
+
+def test_a_forged_save_runs_nothing(tmp_path: Path) -> None:
+    marker = tmp_path / "pwned"
+    save_dir = _write_apsave(tmp_path, {"location_checks": _Exploit(marker)})
+
+    assert load_save_state(save_dir) == {}
+    assert not marker.exists()
+
+
+def test_sets_pickled_as_a_global_still_load(tmp_path: Path) -> None:
+    # Protocol 3 has no set opcode: the set goes through find_class, unlike the default protocol.
+    (tmp_path / "old.apsave").write_bytes(zlib.compress(pickle.dumps({"location_checks": {1: {100}}}, protocol=3)))
+
+    assert load_save_state(str(tmp_path))[1].checks_done == 1

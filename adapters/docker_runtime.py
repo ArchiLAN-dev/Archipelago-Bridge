@@ -200,6 +200,8 @@ class DockerRuntimeAdapter:
             "Cmd": cmd,
             "HostConfig": {
                 "Binds": [self._volume_bind()],
+                # It reads a file and prints JSON: nothing here needs a network.
+                "NetworkMode": "none",
             },
         }
 
