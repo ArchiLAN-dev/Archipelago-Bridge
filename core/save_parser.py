@@ -3,21 +3,55 @@ from __future__ import annotations
 import builtins
 import collections
 import glob
-import importlib
 import io
-import json
 import logging
 import os
 import pickle
-import sys
 import zlib
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from .domain import HintInfo, PlayerState
 
 _SAFE_BUILTINS = frozenset({"set", "frozenset"})
-_SAFE_NET_UTILS = frozenset({"NetworkItem", "ClientStatus", "Hint", "SlotType", "NetworkSlot", "HintStatus"})
+
+
+class _NetworkItem(NamedTuple):
+    item: int
+    location: int
+    player: int
+    flags: int = 0
+
+
+class _Hint(NamedTuple):
+    receiving_player: int
+    finding_player: int
+    location: int
+    item: int
+    found: bool
+    entrance: str = ""
+    item_flags: int = 0
+    status: int = 0
+
+
+class _NetworkSlot(NamedTuple):
+    name: str
+    game: str
+    type: int
+    group_members: Sequence[int] = ()
+
+
+# NetUtils lives in the AP image, not in this one: what a save holds of it, field for field. The
+# enums pickle as a call on their value, and only that value is ever read here.
+_NET_UTILS: dict[str, Any] = {
+    "NetworkItem": _NetworkItem,
+    "Hint": _Hint,
+    "NetworkSlot": _NetworkSlot,
+    "ClientStatus": int,
+    "HintStatus": int,
+    "SlotType": int,
+}
 
 
 def _save_slot_map(mapping: dict[Any, Any]) -> dict[int, Any]:
@@ -77,67 +111,11 @@ def _extract_hints(raw_hints: set) -> list[HintInfo]:
     return result
 
 
-def load_save_state_from_json(json_str: str) -> dict[int, PlayerState]:
-    """Parse JSON output from read_save.py (Docker path) into PlayerState per slot."""
-    log = logging.getLogger(__name__)
-    try:
-        data: dict[str, Any] = json.loads(json_str)
-        if "error" in data:
-            log.warning("read_save.py reported error: %s", data["error"])
-            return {}
-
-        states: dict[int, PlayerState] = {}
-        for slot_str, info in data.items():
-            try:
-                slot = int(slot_str)
-                ps = PlayerState(slot_index=slot)
-                ps._checked_locations = {int(x) for x in info.get("checked_locations", [])}
-                ps.checks_done = len(ps._checked_locations)
-                ps.client_status = int(info.get("client_status", 0))
-                if ps.client_status == 30:
-                    ps.goal_reached_at = datetime.now(timezone.utc).isoformat()
-                ps._received_items = [
-                    (int(item[0]), int(item[1]), int(item[2]))
-                    for item in info.get("received_items", [])
-                ]
-                ps.items_received = len(ps._received_items)
-                ps.hints_used = int(info.get("hints_used", 0))
-                ps.hint_points_per_check = int(info.get("location_check_points", 1))
-                hints: list[HintInfo] = []
-                for h in info.get("hints", []):
-                    try:
-                        hints.append(HintInfo(
-                            receiving_player=int(h.get("receiving_player", 0)),
-                            finding_player=int(h.get("finding_player", 0)),
-                            location_id=int(h.get("location", 0)),
-                            item_id=int(h.get("item", 0)),
-                            entrance=str(h.get("entrance", "")),
-                            item_flags=int(h.get("item_flags", 0)),
-                            status=int(h.get("status", 0)),
-                        ))
-                    except Exception:
-                        pass
-                ps._hints = hints
-                states[slot] = ps
-            except Exception as exc:
-                log.warning("load_save_state_from_json: slot %s failed: %s", slot_str, exc)
-
-        log.info(
-            "save state loaded from JSON: %d slot(s) - statuses: %s",
-            len(states),
-            {s: p.client_status for s, p in states.items()},
-        )
-        return states
-    except Exception as exc:
-        log.warning("load_save_state_from_json failed: %s", exc)
-        return {}
-
-
 class _SaveUnpickler(pickle.Unpickler):
     """Only what an Archipelago save holds: the allowlist of ``Utils.restricted_loads``.
 
     The save directory also receives imported archives, so an ``.apsave`` can come from a member,
-    and plain pickle runs code while loading. This process holds the Docker socket.
+    and plain pickle runs code while loading.
     """
 
     def find_class(self, module: str, name: str) -> Any:  # noqa: ANN401 - pickle's own signature
@@ -145,17 +123,13 @@ class _SaveUnpickler(pickle.Unpickler):
             return getattr(builtins, name)
         if module == "collections" and name == "Counter":
             return collections.Counter
-        if module == "NetUtils" and name in _SAFE_NET_UTILS:
-            return getattr(importlib.import_module("NetUtils"), name)
+        if module == "NetUtils" and name in _NET_UTILS:
+            return _NET_UTILS[name]
         raise pickle.UnpicklingError(f"forbidden global in save: {module}.{name}")
 
 
 def load_save_state(save_dir: str) -> dict[int, PlayerState]:
     """Read latest .apsave file and return initial PlayerState per slot index."""
-    _ap_src = "/app/ArchipelagoSrc"
-    if os.path.isdir(_ap_src) and _ap_src not in sys.path:
-        sys.path.insert(0, _ap_src)
-
     log = logging.getLogger(__name__)
     try:
         files = glob.glob(f"{save_dir}/*.apsave")

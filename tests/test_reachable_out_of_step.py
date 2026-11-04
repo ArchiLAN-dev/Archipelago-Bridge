@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from bridge.adapters.docker_runtime import DockerRuntimeAdapter
+from bridge.adapters.reachable_socket import ReachableSocketAdapter
 from bridge.core import reachable, rest_reachable
 from bridge.core.reachable import OUT_OF_TURN, _compute_reachable, set_reachable_publisher, start_reachable
 from bridge.core.state import StateManager
@@ -31,57 +31,62 @@ from bridge.tests.test_rest_handlers import _make_app
 
 
 class _Stream:
-    """An exec stream: answers `{"ready": true}` once released, then one result per request,
-    echoing the slot the request named."""
+    """A connection to the reachable host: reads the seed line, answers `{"ready": true}` once
+    released, then one result per request, echoing the slot the request named."""
 
     def __init__(self, ready: asyncio.Event) -> None:
         self._ready = ready
         self._out: asyncio.Queue[bytes] = asyncio.Queue()
         self.closed = False
         self._sent_ready = False
+        self.seed: dict[str, Any] | None = None
 
-    async def read_out(self) -> tuple[int, bytes] | None:
+    async def readline(self) -> bytes:
         if not self._sent_ready:
             await self._ready.wait()
             self._sent_ready = True
-            return (1, b'{"ready": true}\n')
-        return (1, await self._out.get())
+            return b'{"ready": true}\n'
+        return await self._out.get()
 
-    async def write_in(self, data: bytes) -> None:
-        slot = json.loads(data).get("slot")
-        self._out.put_nowait(json.dumps({"slot": slot, "counts": {"reachable_now": 3}}).encode() + b"\n")
+    def write(self, data: bytes) -> None:
+        request = json.loads(data)
+        if self.seed is None:
+            self.seed = request
+            return
+        answer = {"slot": request.get("slot"), "counts": {"reachable_now": 3}}
+        self._out.put_nowait(json.dumps(answer).encode() + b"\n")
 
-    async def close(self) -> None:
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
         self.closed = True
 
+    async def wait_closed(self) -> None:
+        return None
 
-class _Docker:
-    """The slice of aiodocker the adapter uses; records each daemon exec'd."""
+
+class _Host:
+    """The reachable host of the AP container; records each connection, hence each daemon."""
 
     def __init__(self) -> None:
         self.ready = asyncio.Event()
         self.streams: list[_Stream] = []
-        self.commands: list[list[str]] = []
-        self.containers = self
 
-    def container(self, _name: str) -> _Docker:
-        return self
-
-    async def exec(self, **kwargs: Any) -> SimpleNamespace:
-        self.commands.append(kwargs["cmd"])
+    async def connect(self) -> tuple[_Stream, _Stream]:
         stream = _Stream(self.ready)
         self.streams.append(stream)
-        return SimpleNamespace(start=lambda detach: stream)
+        return stream, stream
 
 
-def _adapter() -> tuple[DockerRuntimeAdapter, _Docker]:
-    adapter = DockerRuntimeAdapter(SimpleNamespace(session_id="s1", ap_worlds_dir="/data/worlds"))  # type: ignore[arg-type]
-    docker = _Docker()
-    adapter._docker = docker  # type: ignore[assignment]
-    return adapter, docker
+def _adapter() -> tuple[ReachableSocketAdapter, _Host]:
+    adapter = ReachableSocketAdapter(SimpleNamespace(reachable_socket="/data/reachable.sock"))  # type: ignore[arg-type]
+    host = _Host()
+    adapter._connect = host.connect  # type: ignore[method-assign,assignment]
+    return adapter, host
 
 
-async def _ask(adapter: DockerRuntimeAdapter, slot: int) -> dict[str, Any]:
+async def _ask(adapter: ReachableSocketAdapter, slot: int) -> dict[str, Any]:
     line = await adapter.run_reachable(slot=slot, arch_file="a", yamls_dir="y", state_json=json.dumps({"slot": slot}))
     result: dict[str, Any] = json.loads(line)
     return result
@@ -89,45 +94,45 @@ async def _ask(adapter: DockerRuntimeAdapter, slot: int) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_one_session_daemon_answers_every_slot() -> None:
-    adapter, docker = _adapter()
-    docker.ready.set()
+    adapter, host = _adapter()
+    host.ready.set()
 
     assert [(await _ask(adapter, slot))["slot"] for slot in (1, 2, 3)] == [1, 2, 3]
-    assert len(docker.commands) == 1, "one daemon for the whole session"
-    assert "--session" in docker.commands[0] and "--slot" not in docker.commands[0]
+    assert len(host.streams) == 1, "one daemon for the whole session"
+    assert host.streams[0].seed == {"archipelago": "a", "yamls": "y"}
 
 
 @pytest.mark.asyncio
 async def test_a_start_cut_short_never_leaves_a_daemon_with_its_ready_line_unread() -> None:
-    adapter, docker = _adapter()
+    adapter, host = _adapter()
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(_ask(adapter, 1), timeout=0.05)
 
     assert adapter._daemon is None, "a daemon whose ready line was not read is never handed out"
-    assert docker.streams[0].closed
+    assert host.streams[0].closed
 
-    docker.ready.set()
+    host.ready.set()
     assert (await _ask(adapter, 1))["counts"] == {"reachable_now": 3}, "the next request gets a result, not the ready line"
 
 
 @pytest.mark.asyncio
 async def test_two_callers_share_one_daemon_start() -> None:
-    adapter, docker = _adapter()
+    adapter, host = _adapter()
 
     first = asyncio.create_task(_ask(adapter, 1))
     second = asyncio.create_task(_ask(adapter, 2))
     await asyncio.sleep(0.01)
-    docker.ready.set()
+    host.ready.set()
 
     assert [r["slot"] for r in await asyncio.gather(first, second)] == [1, 2]
-    assert len(docker.streams) == 1, "one daemon, started once"
+    assert len(host.streams) == 1, "one daemon, started once"
 
 
 @pytest.mark.asyncio
 async def test_a_request_cancelled_midway_drops_the_daemon() -> None:
-    adapter, docker = _adapter()
-    docker.ready.set()
+    adapter, host = _adapter()
+    host.ready.set()
     await _ask(adapter, 1)
     daemon = adapter._daemon
     assert daemon is not None
@@ -145,16 +150,16 @@ async def test_a_request_cancelled_midway_drops_the_daemon() -> None:
 
 @pytest.mark.asyncio
 async def test_an_idle_daemon_is_closed_and_a_busy_one_kept() -> None:
-    adapter, docker = _adapter()
-    docker.ready.set()
+    adapter, host = _adapter()
+    host.ready.set()
     await _ask(adapter, 1)
 
     assert not await adapter.release_idle(idle_seconds=60), "used just now"
     assert await adapter.release_idle(idle_seconds=0)
-    assert adapter._daemon is None and docker.streams[0].closed
+    assert adapter._daemon is None and host.streams[0].closed
 
     await _ask(adapter, 1)
-    assert len(docker.streams) == 2, "the next request starts another"
+    assert len(host.streams) == 2, "the next request starts another"
 
 
 class _OutOfStepRuntime:

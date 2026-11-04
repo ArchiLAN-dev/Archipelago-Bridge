@@ -18,10 +18,10 @@ class Config:
 
     slot_names: list[dict[str, str]] = field(default_factory=list)
 
-    # Runtime adapter: "docker" for ephemeral containers, anything else = no Docker
+    # "socket": reachability comes from the AP container, over a socket of the session volume.
+    # Anything else runs reachable.py as a local subprocess.
     runtime: str = "none"
-    ap_image: str = ""    # AP Docker image (required when runtime="docker")
-    ap_network: str = ""  # Docker network the bridge container is attached to
+    reachable_socket: str = "/data/reachable.sock"
     ap_worlds_dir: str = "/data/worlds"  # path to custom apworld files inside the session volume
 
     ap_admin_password: str = ""  # AP server admin password (enables !admin commands)
@@ -42,8 +42,7 @@ class Config:
             rest_port=int(os.environ.get("REST_PORT", "5000")),
             save_dir=os.environ.get("SAVE_DIR", "/archipelago/output"),
             runtime=os.environ.get("AP_RUNTIME", "none"),
-            ap_image=os.environ.get("AP_IMAGE", ""),
-            ap_network=os.environ.get("AP_NETWORK", ""),
+            reachable_socket=os.environ.get("REACHABLE_SOCKET", "/data/reachable.sock"),
             ap_worlds_dir=os.environ.get("AP_WORLDS_DIR", "/data/worlds"),
             ap_admin_password=os.environ.get("AP_ADMIN_PASSWORD", ""),
             central_api_url=os.environ.get("CENTRAL_API_URL", ""),

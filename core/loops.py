@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import logging
-import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -12,7 +10,6 @@ from typing import Any
 import httpx
 
 from .reachable import ReachablePublisher, _compute_reachable, _reachable_cache
-from .save_parser import load_save_state_from_json
 from .state import StateManager
 
 BroadcastFn = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -167,7 +164,6 @@ async def _apsave_reconcile_loop(
     broadcast: BroadcastFn,
     session_id: str,
     recompute_event: asyncio.Event,
-    runtime: Any = None,
     notify_state_changed: Callable[[], Awaitable[None]] | None = None,
     interval: float = 5.0,
 ) -> None:
@@ -184,26 +180,7 @@ async def _apsave_reconcile_loop(
         try:
             before = {slot: (ps.checks_done, ps.items_received) for slot, ps in state._states.items()}
 
-            if runtime is not None and hasattr(runtime, "run_save_parse") and state._save_dir:
-                files = glob.glob(f"{state._save_dir}/*.apsave")
-                if files:
-                    latest_mtime = max(os.path.getmtime(f) for f in files)
-                    if latest_mtime > state._save_mtime:
-                        try:
-                            output = await asyncio.wait_for(
-                                runtime.run_save_parse(save_dir=state._save_dir),
-                                timeout=60.0,
-                            )
-                            saved = load_save_state_from_json(output)
-                            state.apply_saved_states(saved)
-                            state._save_mtime = latest_mtime
-                        except asyncio.TimeoutError:
-                            log.warning("apsave reconcile: Docker parse timed out")
-                        except Exception as exc:
-                            log.warning("apsave reconcile: Docker parse failed: %s - fallback", exc)
-                            state.merge_state_from_save()
-            else:
-                state.merge_state_from_save()
+            state.merge_state_from_save()
 
             after = {slot: (ps.checks_done, ps.items_received) for slot, ps in state._states.items()}
             changed_slots = [slot for slot, counts in after.items() if before.get(slot) != counts]
