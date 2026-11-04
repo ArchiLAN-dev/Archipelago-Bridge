@@ -13,7 +13,7 @@ if __package__ in {None, ""}:
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, repo_root)
 
-from bridge.adapters.docker_runtime import DockerRuntimeAdapter
+from bridge.adapters.reachable_socket import ReachableSocketAdapter
 from bridge.core.ap_client import ArchipelagoClient, DataPackageStore
 from bridge.core.config import Config
 from bridge.core.domain import HintInfo, PlayerState
@@ -27,7 +27,7 @@ from bridge.core.loops import (
 )
 from bridge.core.reachable import set_reachable_publisher
 from bridge.core.rest import create_app
-from bridge.core.save_parser import load_save_state, load_save_state_from_json
+from bridge.core.save_parser import load_save_state
 from bridge.core.state import StateManager
 from bridge.core.ws_server import WsServer
 
@@ -51,23 +51,11 @@ async def _main() -> None:
 
     log = logging.getLogger(__name__)
 
-    runtime: DockerRuntimeAdapter | None = None
-    if config.runtime == "docker":
-        runtime = DockerRuntimeAdapter(config)
+    runtime: ReachableSocketAdapter | None = None
+    if config.runtime == "socket":
+        runtime = ReachableSocketAdapter(config)
 
-    if runtime is not None and hasattr(runtime, "run_save_parse"):
-        try:
-            output = await asyncio.wait_for(
-                runtime.run_save_parse(save_dir=config.save_dir),
-                timeout=60.0,
-            )
-            initial_state = load_save_state_from_json(output)
-            log.info("initial state loaded via Docker save parse: %d slot(s)", len(initial_state))
-        except Exception as exc:
-            log.warning("Docker save parse failed at startup: %s - falling back to local parse", exc)
-            initial_state = load_save_state(config.save_dir)
-    else:
-        initial_state = load_save_state(config.save_dir)
+    initial_state = load_save_state(config.save_dir)
 
     goals_file = os.path.join(config.save_dir, "bridge_goals.json")
     state = StateManager(initial_state, goals_file=goals_file, save_dir=config.save_dir)
@@ -117,7 +105,6 @@ async def _main() -> None:
     _reconcile_task = asyncio.create_task(
         _apsave_reconcile_loop(
             state, ws_server.broadcast, config.session_id, recompute_event,
-            runtime=runtime,
             notify_state_changed=ap_client.notify_state_changed,
         )
     )

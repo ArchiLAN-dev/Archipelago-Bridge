@@ -200,7 +200,7 @@ async def _compute_reachable(
     })
 
     async with semaphore:
-        # Docker mode: delegate to ephemeral AP container via runtime adapter.
+        # Socket mode: the daemon runs in the AP container, behind the runtime adapter.
         if runtime is not None and hasattr(runtime, "run_reachable"):
             try:
                 output = await asyncio.wait_for(
@@ -226,11 +226,11 @@ async def _compute_reachable(
                     await _reset_daemon(slot, runtime, log)
                 return None, err
             _reachable_cache[slot] = (cache_key, result)
-            log.info("reachable: docker slot=%d reachable=%d",
+            log.info("reachable: socket slot=%d reachable=%d",
                      slot, result.get("counts", {}).get("reachable_now", 0))
             return result, ""
 
-        # Subprocess / daemon path (non-Docker mode).
+        # Subprocess / daemon path (no AP container to talk to).
         state_payload_nl = state_payload + "\n"
         daemon_proc = _reachable_daemons.get(slot)
         daemon_event = _daemon_ready_events.get(slot)

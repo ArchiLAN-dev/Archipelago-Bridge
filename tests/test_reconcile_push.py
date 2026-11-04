@@ -17,7 +17,6 @@ async def _run_loop_once(state: StateManager, notify: AsyncMock) -> None:
             AsyncMock(),
             "run-1",
             asyncio.Event(),
-            runtime=None,
             notify_state_changed=notify,
             interval=0.01,
         )

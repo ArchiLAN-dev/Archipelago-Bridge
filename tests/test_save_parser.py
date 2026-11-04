@@ -1,7 +1,6 @@
 """Tests for .apsave parsing (AC #8, #13)."""
 from __future__ import annotations
 
-import json
 import os
 import pickle
 import zlib
@@ -10,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from bridge.bridge import load_save_state
-from bridge.core.save_parser import load_save_state_from_json
 
 
 def _write_apsave(tmp_path: Path, data: dict) -> str:
@@ -100,79 +98,6 @@ def test_multiple_slots(tmp_path: Path, slots: dict, expected_counts: dict) -> N
 
     for slot, expected in expected_counts.items():
         assert result[slot].checks_done == expected
-
-
-# ---------------------------------------------------------------------------
-# load_save_state_from_json (Docker path)
-# ---------------------------------------------------------------------------
-
-def test_load_from_json_basic() -> None:
-    payload = {
-        "1": {
-            "checked_locations": [100, 101, 102],
-            "received_items": [[500, 2, 100], [501, 2, 101]],
-            "client_status": 20,
-            "hints": [],
-            "hints_used": 0,
-            "location_check_points": 1,
-        }
-    }
-    result = load_save_state_from_json(json.dumps(payload))
-    assert 1 in result
-    ps = result[1]
-    assert ps.checks_done == 3
-    assert ps._checked_locations == {100, 101, 102}
-    assert ps.items_received == 2
-    assert ps.client_status == 20
-
-
-def test_load_from_json_goal_status() -> None:
-    payload = {
-        "2": {
-            "checked_locations": list(range(47)),
-            "received_items": [],
-            "client_status": 30,
-            "hints": [],
-            "hints_used": 0,
-            "location_check_points": 1,
-        }
-    }
-    result = load_save_state_from_json(json.dumps(payload))
-    assert result[2].client_status == 30
-    assert result[2].goal_reached_at is not None
-
-
-def test_load_from_json_with_hints() -> None:
-    payload = {
-        "1": {
-            "checked_locations": [],
-            "received_items": [],
-            "client_status": 0,
-            "hints": [
-                {"receiving_player": 1, "finding_player": 2, "location": 81000,
-                 "item": 123456, "entrance": "", "item_flags": 1, "status": 0}
-            ],
-            "hints_used": 1,
-            "location_check_points": 2,
-        }
-    }
-    result = load_save_state_from_json(json.dumps(payload))
-    ps = result[1]
-    assert len(ps._hints) == 1
-    assert ps._hints[0].location_id == 81000
-    assert ps._hints[0].item_id == 123456
-    assert ps.hints_used == 1
-    assert ps.hint_points_per_check == 2
-
-
-def test_load_from_json_error_key_returns_empty() -> None:
-    result = load_save_state_from_json(json.dumps({"error": "no .apsave file found"}))
-    assert result == {}
-
-
-def test_load_from_json_invalid_json_returns_empty() -> None:
-    result = load_save_state_from_json("not json at all")
-    assert result == {}
 
 
 def test_latest_file_selected_by_mtime(tmp_path: Path) -> None:
@@ -276,3 +201,56 @@ def test_sets_pickled_as_a_global_still_load(tmp_path: Path) -> None:
     (tmp_path / "old.apsave").write_bytes(zlib.compress(pickle.dumps({"location_checks": {1: {100}}}, protocol=3)))
 
     assert load_save_state(str(tmp_path))[1].checks_done == 1
+
+
+class _FakeGlobal:
+    """Pickles as a reference to `module.name`, called with `args`: how AP's own types land in a save."""
+
+    def __init__(self, module: str, name: str, args: tuple[object, ...]) -> None:
+        self.module, self.name, self.args = module, name, args
+
+    def dump(self, protocol: int = 4) -> bytes:
+        return b"".join([
+            b"c", self.module.encode(), b"\n", self.name.encode(), b"\n",
+            pickle.dumps(self.args, protocol=0)[:-1], b"R",
+        ])
+
+
+def _save_with(tmp_path: Path, *, item: _FakeGlobal, hint: _FakeGlobal, status: _FakeGlobal) -> str:
+    """A save holding AP's NetUtils types, which do not exist in this image."""
+    stream = b"".join([
+        b"(dp0\n",
+        b"S'received_items'\n(dp1\nI1\n(l", item.dump(), b"as",
+        b"sS'client_game_state'\n(dp2\nI1\n", status.dump(), b"s",
+        b"sS'hints'\n(dp3\nI1\n(l", hint.dump(), b"as",
+        b"s.",
+    ])
+    (tmp_path / "ap.apsave").write_bytes(zlib.compress(stream))
+    return str(tmp_path)
+
+
+def test_a_save_reads_without_the_ap_sources(tmp_path: Path) -> None:
+    save_dir = _save_with(
+        tmp_path,
+        item=_FakeGlobal("NetUtils", "NetworkItem", (500, 100, 2, 1)),
+        hint=_FakeGlobal("NetUtils", "Hint", (1, 2, 81000, 123456, False, "", 1, 30)),
+        status=_FakeGlobal("NetUtils", "ClientStatus", (30,)),
+    )
+
+    state = load_save_state(save_dir)[1]
+
+    assert state._received_items == [(500, 2, 100)]
+    assert state.client_status == 30
+    assert state._hints[0].location_id == 81000
+    assert state._hints[0].status == 30
+
+
+def test_an_unknown_net_utils_name_is_refused(tmp_path: Path) -> None:
+    save_dir = _save_with(
+        tmp_path,
+        item=_FakeGlobal("NetUtils", "encode", ("x",)),
+        hint=_FakeGlobal("NetUtils", "Hint", (1, 2, 3, 4, False)),
+        status=_FakeGlobal("NetUtils", "ClientStatus", (0,)),
+    )
+
+    assert load_save_state(save_dir) == {}
