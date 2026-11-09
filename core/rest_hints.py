@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -97,10 +98,14 @@ async def request_hint(
     if body.free:
         # Free/admin path (story 9.28): the bridge issues an admin command on its own
         # connection; the server resolves the location → item and creates a priority hint.
+        # The server splits commands with shlex: every argument is quoted, or a player name with a
+        # space (or a name with an apostrophe, which drops the whole line back to a plain split)
+        # hints the wrong player or nothing.
         # Admin hints spend no player points, so hints_used is not bumped here.
-        player_name = ap_client._store.resolve_player(slot)
+        # The server matches its slot names, not the display alias.
+        player_name = ap_client._store.slot_name(slot) or ap_client._store.resolve_player(slot)
         try:
-            await ap_client.send_admin_command(f"!admin /hint_location {player_name} {location_name}")
+            await ap_client.send_admin_command(f"!admin /hint_location {shlex.quote(player_name)} {shlex.quote(location_name)}")
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     else:
@@ -140,9 +145,10 @@ async def request_hint_item(
     item_name = body.itemName.strip()
 
     if body.free:
-        player_name = ap_client._store.resolve_player(slot)
+        # The server matches its slot names, not the display alias.
+        player_name = ap_client._store.slot_name(slot) or ap_client._store.resolve_player(slot)
         try:
-            await ap_client.send_admin_command(f"!admin /hint {player_name} {item_name}")
+            await ap_client.send_admin_command(f"!admin /hint {shlex.quote(player_name)} {shlex.quote(item_name)}")
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     else:

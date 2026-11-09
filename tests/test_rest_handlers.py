@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import collections
+import shlex
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -131,7 +132,7 @@ async def test_request_hint_success_free() -> None:
         assert data["free"] is True
 
     # Admin hint by location: the server resolves location → item (story 9.28)
-    ap_client.send_admin_command.assert_awaited_once_with("!admin /hint_location TestPlayer Test Location")
+    ap_client.send_admin_command.assert_awaited_once_with("!admin /hint_location TestPlayer 'Test Location'")
     # Free/admin hints spend no player points, so the "indices demandés" counter must not move.
     assert state.ensure_slot(1).hints_used == 0
 
@@ -492,3 +493,28 @@ async def test_update_hint_status_ws_disconnected_returns_503() -> None:
         assert resp.status_code == 503
         data = resp.json()
         assert data["error"] == "ws_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_free_admin_hints_quote_every_argument_and_use_the_slot_name() -> None:
+    """The server splits admin commands with shlex: a slot name with a space must stay one argument,
+    and an apostrophe in a location name must not drop the whole line back to a plain split."""
+    app, _, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.send_admin_command = AsyncMock()
+    ap_client._broadcast_hints = AsyncMock()
+    ap_client._store._slot_games[1] = "TestGame"
+    ap_client._store._location_names["TestGame"] = {42: "Link's House"}
+    ap_client._store._slot_names[1] = "Bob le Bricoleur"
+    ap_client._store._slot_aliases[1] = "Bobby"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/hints/1/request", json={"locationId": 42, "free": True})).status_code == 200
+        assert (await client.post("/slots/1/hints/request-item", json={"itemName": "Moon Pearl", "free": True})).status_code == 200
+
+    sent = [call.args[0] for call in ap_client.send_admin_command.await_args_list]
+    assert sent == [
+        "!admin /hint_location 'Bob le Bricoleur' 'Link'\"'\"'s House'",
+        "!admin /hint 'Bob le Bricoleur' 'Moon Pearl'",
+    ]
+    assert shlex.split(sent[0]) == ["!admin", "/hint_location", "Bob le Bricoleur", "Link's House"]
