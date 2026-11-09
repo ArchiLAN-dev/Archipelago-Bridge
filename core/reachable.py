@@ -199,6 +199,59 @@ async def _compute_reachable(
         "received_items": list(ps._received_items) if ps else [],
     })
 
+    result, err = await _run_reachable(slot, state_payload, arch_files[0], yamls_dir, semaphore, log, runtime)
+    if result is not None:
+        _reachable_cache[slot] = (cache_key, result)
+    return result, err
+
+
+def _session_files() -> tuple[str, str] | None:
+    """The session's .archipelago (newest) and its yamls folder, or None before generation."""
+    output_dir = os.environ.get("AP_OUTPUT_DIR", os.environ.get("ARCHIPELAGO_OUTPUT_DIR", "/data/output"))
+    arch_files = sorted(
+        glob.glob(f"{output_dir}/*.archipelago") or glob.glob(f"{output_dir}/*.zip"),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if not arch_files:
+        return None
+    return arch_files[0], os.environ.get("AP_YAMLS_DIR", os.path.join(os.path.dirname(output_dir), "yamls"))
+
+
+async def compute_reachable_with(
+    slot: int,
+    extra_items: list[tuple[int, int, int]],
+    state: StateManager,
+    semaphore: asyncio.Semaphore,
+    log: logging.Logger,
+    runtime: Any = None,
+) -> tuple[dict | None, str]:
+    """Reachability as if the slot had also received `extra_items` (story 52.3): a what-if, never cached.
+
+    The tracker builds a fresh state per request, so the answer says nothing about the next one.
+    """
+    files = _session_files()
+    if files is None:
+        return None, "no .archipelago file"
+    ps = state._states.get(slot)
+    state_payload = json.dumps({
+        "slot": slot,
+        "checked_locations": list(ps._checked_locations) if ps else [],
+        "received_items": (list(ps._received_items) if ps else []) + [list(i) for i in extra_items],
+    })
+    return await _run_reachable(slot, state_payload, files[0], files[1], semaphore, log, runtime)
+
+
+async def _run_reachable(
+    slot: int,
+    state_payload: str,
+    arch_file: str,
+    yamls_dir: str,
+    semaphore: asyncio.Semaphore,
+    log: logging.Logger,
+    runtime: Any = None,
+) -> tuple[dict | None, str]:
+    """One request to the tracker (socket, daemon, or a one-shot subprocess). Writes no cache."""
     async with semaphore:
         # Socket mode: the daemon runs in the AP container, behind the runtime adapter.
         if runtime is not None and hasattr(runtime, "run_reachable"):
@@ -206,7 +259,7 @@ async def _compute_reachable(
                 output = await asyncio.wait_for(
                     runtime.run_reachable(
                         slot=slot,
-                        arch_file=arch_files[0],
+                        arch_file=arch_file,
                         yamls_dir=yamls_dir,
                         state_json=state_payload,
                     ),
@@ -225,7 +278,6 @@ async def _compute_reachable(
                 if err == OUT_OF_TURN:
                     await _reset_daemon(slot, runtime, log)
                 return None, err
-            _reachable_cache[slot] = (cache_key, result)
             log.info("reachable: socket slot=%d reachable=%d",
                      slot, result.get("counts", {}).get("reachable_now", 0))
             return result, ""
@@ -247,8 +299,7 @@ async def _compute_reachable(
                     if err == OUT_OF_TURN:
                         await _reset_daemon(slot, None, log)
                     return None, err
-                _reachable_cache[slot] = (cache_key, result)
-                log.info("reachable: daemon slot=%d reachable=%d",
+                    log.info("reachable: daemon slot=%d reachable=%d",
                          slot, result.get("counts", {}).get("reachable_now", 0))
                 return result, ""
             except asyncio.CancelledError:
@@ -262,11 +313,11 @@ async def _compute_reachable(
 
         existing = _reachable_daemons.get(slot)
         if existing is None or existing.returncode is not None:
-            asyncio.create_task(_start_daemon(slot, arch_files[0], log))
+            asyncio.create_task(_start_daemon(slot, arch_file, log))
 
         cmd = [
             sys.executable, "/reachable/reachable.py",
-            "--archipelago", arch_files[0],
+            "--archipelago", arch_file,
             "--yamls", yamls_dir,
             "--slot", str(slot),
         ]
@@ -309,7 +360,6 @@ async def _compute_reachable(
     if err is not None:
         return None, err
 
-    _reachable_cache[slot] = (cache_key, result)
     log.info("reachable: done slot=%d reachable=%d",
              slot, result.get("counts", {}).get("reachable_now", 0))
     return result, ""

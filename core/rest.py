@@ -11,6 +11,7 @@ from .ap_client import ArchipelagoClient
 from .rest_checks import router as checks_router
 from .rest_hints import router as hints_router
 from .rest_output import router as output_router
+from .rest_passeur import router as passeur_router
 from .rest_reachable import router as reachable_router
 from .rest_session import router as session_router
 from .state import StateManager
@@ -47,6 +48,7 @@ def create_app(
     app.include_router(checks_router)
     app.include_router(reachable_router)
     app.include_router(output_router)
+    app.include_router(passeur_router)
 
     if ws_server is not None:
         app.add_api_websocket_route("/ws", ws_server.handle_ws)

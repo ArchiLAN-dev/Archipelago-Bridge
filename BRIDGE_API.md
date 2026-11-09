@@ -749,6 +749,34 @@ Errors: `422 race_mode_active`
 
 ---
 
+#### `GET /slots/{slot}/passeur/items`
+The slot's items not received yet that sit in another world's unopened location. `flags` is the
+item classification of that location (bit 1 = progression); `sphere` is the location's sphere in
+the finding world's tracker result, `null` when that world has none.
+```jsonc
+{
+  "slot": 1,
+  "items": [
+    { "locationId": 401, "locationName": "Link House", "findingSlot": 2, "findingPlayerName": "Bob",
+      "itemId": 101, "itemName": "Claw", "flags": 1, "sphere": 2 }
+  ]
+}
+```
+
+#### `POST /slots/{slot}/passeur/unlocks`
+Asks the exact tracker how many of the slot's locations become reachable with each candidate
+received. Never cached. At most 10 candidates.
+```jsonc
+// request
+{ "candidates": [ { "itemId": 101, "findingSlot": 2, "locationId": 401 } ] }
+// response
+{ "slot": 1, "baseline": 3, "unlocks": [ { "findingSlot": 2, "locationId": 401, "reachableNow": 13 } ] }
+```
+
+Errors: `503 tracking_unavailable` (no tracker for this slot), `422` (too many candidates)
+
+---
+
 ## WebSocket Protocol
 
 ### Connection
