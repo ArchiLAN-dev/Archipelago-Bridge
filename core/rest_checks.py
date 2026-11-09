@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from .ap_client import ArchipelagoClient
 from .deps import get_ap_client, get_bridge_state, is_authorized, require_auth
@@ -12,6 +12,7 @@ from .schemas import (
     ChecksResponse,
     LocationPlacementResponse,
     MissingItemsResponse,
+    SendLocationResponse,
     SlotItem,
     SlotItemFoundAt,
     SlotItemsResponse,
@@ -195,3 +196,53 @@ async def get_slot_spoiler(
 
     placements.sort(key=lambda p: p.locationName)
     return SlotSpoilerResponse(placements=placements)
+
+
+#: Story 52.1: HTTP status of each refusal of POST /slots/{slot}/locations/{location}/send.
+_SEND_LOCATION_STATUS = {
+    "ws_disconnected": 503,
+    "unknown_slot": 404,
+    "unknown_location": 404,
+    "already_checked": 409,
+    "refused": 422,
+    "timeout": 504,
+}
+
+
+@router.post(
+    "/slots/{slot}/locations/{location_id}/send",
+    response_model=SendLocationResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def send_location(
+    slot: int,
+    location_id: int,
+    ap_client: ArchipelagoClient = Depends(get_ap_client),
+) -> SendLocationResponse:
+    """Open one location of ``slot`` as though that slot checked it (story 52.1, the Passeur).
+
+    The item goes to its receiver like any found item, the location is marked checked for the slot
+    (its game client sees it at its next connection), nothing else of its world is touched. A
+    refusal answers ``{"code": ..., "message": ...}`` with the status of ``_SEND_LOCATION_STATUS``.
+    """
+    outcome = await ap_client.send_location(slot, location_id)
+    if outcome.status != "sent":
+        log.info("send_location refused: slot=%d location=%d status=%s message=%r",
+                 slot, location_id, outcome.status, outcome.message)
+        raise HTTPException(
+            status_code=_SEND_LOCATION_STATUS.get(outcome.status, 502),
+            detail={"code": outcome.status, "message": outcome.message},
+        )
+
+    log.info("send_location: slot=%d location=%d item=%d receiver=%d",
+             slot, location_id, outcome.item_id, outcome.receiving_slot)
+    store = ap_client._store
+    return SendLocationResponse(
+        slot=slot,
+        locationId=location_id,
+        locationName=store.resolve_location(location_id, slot),
+        itemId=outcome.item_id,
+        itemName=store.resolve_item(outcome.item_id, outcome.receiving_slot),
+        receivingSlot=outcome.receiving_slot,
+        receivingPlayerName=store.resolve_player(outcome.receiving_slot),
+    )
