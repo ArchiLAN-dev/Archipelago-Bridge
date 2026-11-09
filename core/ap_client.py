@@ -7,6 +7,7 @@ import glob as _glob
 import json
 import logging
 import re
+import shlex
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
@@ -102,6 +103,21 @@ class SelfHintOutcome:
 
     ok: bool
     reason: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class SendLocationOutcome:
+    """Result of opening one location of a slot as though it was checked (story 52.1, the Passeur).
+
+    ``status`` is ``sent`` on success; otherwise one of ``ws_disconnected`` / ``unknown_slot`` /
+    ``unknown_location`` / ``already_checked`` / ``refused`` / ``timeout``. ``item_id`` and
+    ``receiving_slot`` come from the authoritative ItemSend on success, from the placement otherwise.
+    """
+
+    status: str
+    item_id: int = 0
+    receiving_slot: int = 0
     message: str = ""
 
 
@@ -314,6 +330,12 @@ class ArchipelagoClient:
         # Spoiler-derived placements: finder_slot → {location_id → (item_id, receiver_slot)}
         self._placements: dict[int, dict[int, tuple[int, int]]] = {}
 
+        # Story 52.1: one /send_location at a time, so the server's AdminCommandResult (a refusal; a
+        # success prints nothing) can only belong to the pending one. The waiter is keyed by the
+        # (finder slot, location) its ItemSend will carry.
+        self._send_location_lock = asyncio.Lock()
+        self._send_location_waiter: tuple[int, int, asyncio.Future[SendLocationOutcome]] | None = None
+
         # Hints already announced on the feed, keyed (finding_player, location_id) - a hint is
         # identified by where it points. Seeded by the initial Retrieved snapshot so a bridge
         # restart does not re-announce (and re-persist) every existing hint (story 32.12).
@@ -452,6 +474,59 @@ class ArchipelagoClient:
         if self._config.ap_admin_password:
             await self._ws.send(json.dumps([{"cmd": "Say", "text": f"!admin login {self._config.ap_admin_password}"}]))
         await self._ws.send(json.dumps([{"cmd": "Say", "text": command}]))
+
+    async def send_location(self, slot: int, location_id: int, *, timeout: float = 10.0) -> SendLocationOutcome:
+        """Open ``location_id`` of ``slot`` as though that slot checked it (story 52.1, the Passeur).
+
+        AP 0.6.8 has the server command ``/send_location <player> <location>``, reachable through
+        ``!admin``. It takes a numeric location id (exact, no fuzzy lookup), and the player name is
+        shlex-quoted (the server parses commands with shlex, so a name with spaces stays one argument).
+        On success the server prints nothing back: the proof is the ItemSend PrintJSON it broadcasts to
+        the team for that (finder, location). An unknown or already checked location is a silent no-op
+        server-side, so both are refused here, before anything is sent.
+        """
+        if not self.ws_connected:
+            return SendLocationOutcome(status="ws_disconnected")
+        name = self._store.slot_name(slot)
+        if not name:
+            return SendLocationOutcome(status="unknown_slot", message=f"slot {slot} has no known name")
+        placement = self._placements.get(slot, {}).get(location_id)
+        if placement is None:
+            return SendLocationOutcome(status="unknown_location",
+                                       message=f"location {location_id} is not in slot {slot}'s world")
+        item_id, receiver = placement
+        if self._location_checked(slot, location_id):
+            return SendLocationOutcome(status="already_checked", item_id=item_id, receiving_slot=receiver)
+
+        async with self._send_location_lock:
+            if self._location_checked(slot, location_id):
+                return SendLocationOutcome(status="already_checked", item_id=item_id, receiving_slot=receiver)
+            future: asyncio.Future[SendLocationOutcome] = asyncio.get_running_loop().create_future()
+            self._send_location_waiter = (slot, location_id, future)
+            try:
+                await self.send_admin_command(f"!admin /send_location {shlex.quote(name)} {location_id}")
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                return SendLocationOutcome(status="timeout", item_id=item_id, receiving_slot=receiver,
+                                           message="no ItemSend from the server")
+            finally:
+                self._send_location_waiter = None
+
+    def _location_checked(self, slot: int, location_id: int) -> bool:
+        ps = self._state._states.get(slot)
+        return ps is not None and location_id in ps._checked_locations
+
+    def _resolve_send_location(self, sender: int, loc_id: int, item_id: int, receiver: int) -> None:
+        waiter = self._send_location_waiter
+        if waiter is None or waiter[2].done() or (waiter[0], waiter[1]) != (sender, loc_id):
+            return
+        waiter[2].set_result(SendLocationOutcome(status="sent", item_id=item_id, receiving_slot=receiver))
+
+    def _refuse_send_location(self, packet: dict[str, Any]) -> None:
+        waiter = self._send_location_waiter
+        if waiter is None or waiter[2].done():
+            return
+        waiter[2].set_result(SendLocationOutcome(status="refused", message=self._print_json_text(packet)))
 
     async def send_packet(self, packet: dict[str, Any]) -> None:
         if self._ws is None or not self.ws_connected:
@@ -1058,6 +1133,10 @@ class ArchipelagoClient:
         if msg_type in ("ItemSend", "ItemCheat"):
             self._track_item_send(packet)
             state_changed = True
+        elif msg_type == "AdminCommandResult":
+            # Story 52.1: only the server command processor answers with this type, and only when it
+            # has something to say - for /send_location, that is a refusal (unknown player, game...).
+            self._refuse_send_location(packet)
         elif msg_type == "Goal":
             goal_slot = self._track_goal_returning_slot(packet)
             state_changed = True
@@ -1266,6 +1345,7 @@ class ArchipelagoClient:
         self._apply_item_send(sender, found_loc_id, found_item_id, found_receiver)
 
     def _apply_item_send(self, sender: int, loc_id: int, item_id: int, receiver: int) -> None:
+        self._resolve_send_location(sender, loc_id, item_id, receiver)
         if loc_id:
             self._state.add_location_checks(sender, [loc_id])
             ps = self._state.ensure_slot(sender)

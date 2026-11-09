@@ -237,6 +237,18 @@ class SlotSpoilerResponse(BaseModel):
     placements: list[LocationPlacementResponse]
 
 
+class SendLocationResponse(BaseModel):
+    """Story 52.1: a location opened as though its slot checked it (the Passeur)."""
+
+    slot: int
+    locationId: int
+    locationName: str
+    itemId: int
+    itemName: str
+    receivingSlot: int
+    receivingPlayerName: str
+
+
 # ---------------------------------------------------------------------------
 # Spheres endpoint
 # ---------------------------------------------------------------------------
