@@ -9,7 +9,7 @@ FROM python:3.10-slim
 # continue de servir une couche figée. Quand une CVE corrigée apparaît sans changement de code,
 # modifier l'instruction elle-même - un commentaire au-dessus ne suffit pas, il ne fait pas partie
 # de la commande et n'entre pas dans la clé de cache.
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* && echo "rebuild 2026-11-10: CVE-2026-109518 apt, CVE-2026-85091 zlib"
 
 WORKDIR /service
 
