@@ -404,10 +404,17 @@ def test_route_parity() -> None:
 # update_hint_status (PATCH /slots/{slot}/hints/{location_id})
 # ---------------------------------------------------------------------------
 
-def _seed_hint(ap_client: ArchipelagoClient, state: StateManager, slot: int, location_id: int, status: int = 0) -> None:
+def _seed_hint(
+    ap_client: ArchipelagoClient,
+    state: StateManager,
+    slot: int,
+    location_id: int,
+    status: int = 0,
+    finding_player: int | None = None,
+) -> None:
     hint = HintInfo(
         receiving_player=slot,
-        finding_player=slot,
+        finding_player=slot if finding_player is None else finding_player,
         location_id=location_id,
         item_id=9001,
         entrance="",
@@ -436,12 +443,70 @@ async def test_update_hint_status_success() -> None:
         assert data["slot"] == 1
         assert data["locationId"] == 42
 
-    # (slot, receiving_player, location_id, status) - player is the hint's receiving player.
+    # (slot, finding_player, location_id, status) - AP finds the hint by its finding player.
     ap_client.update_hint.assert_awaited_once_with(1, 1, 42, 30)
     ap_client._broadcast_hints.assert_awaited_once_with(1)
 
     hints = state.get_hints(1)
     assert hints[0].status == 30
+
+
+@pytest.mark.asyncio
+async def test_update_hint_status_targets_the_world_of_the_location() -> None:
+    # Two worlds of the same game share location ids: the same id hinted in worlds 3 and 5.
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.update_hint = AsyncMock(return_value=True)
+    ap_client._broadcast_hints = AsyncMock()
+    _seed_hint(ap_client, state, slot=1, location_id=42, finding_player=3)
+    _seed_hint(ap_client, state, slot=1, location_id=42, finding_player=5)
+    assert len(state.get_hints(1)) == 2
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/slots/1/hints/42", json={"status": 30, "findingPlayer": 5})
+        assert resp.status_code == 200
+
+    # The packet names the world of the location, not the receiving player.
+    ap_client.update_hint.assert_awaited_once_with(1, 5, 42, 30)
+    by_world = {h.finding_player: h.status for h in state.get_hints(1)}
+    assert by_world == {3: 0, 5: 30}
+
+
+@pytest.mark.asyncio
+async def test_update_hint_status_unknown_world_returns_404() -> None:
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.update_hint = AsyncMock(return_value=True)
+    _seed_hint(ap_client, state, slot=1, location_id=42, finding_player=3)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/slots/1/hints/42", json={"status": 30, "findingPlayer": 9})
+        assert resp.status_code == 404
+    ap_client.update_hint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_hint_status_refuses_a_hint_the_slot_does_not_receive() -> None:
+    # Slot 1 finds an item of slot 2 in its world: only slot 2 may rank that hint (AP: No Permission).
+    app, state, ap_client = _make_app()
+    ap_client.ws_connected = True
+    ap_client.update_hint = AsyncMock(return_value=True)
+    state.add_hint(1, HintInfo(
+        receiving_player=2,
+        finding_player=1,
+        location_id=42,
+        item_id=9001,
+        entrance="",
+        item_flags=0,
+        status=0,
+        item_name="Sword",
+        location_name="Cave",
+    ))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/slots/1/hints/42", json={"status": 30, "findingPlayer": 1})
+        assert resp.status_code == 403
+    ap_client.update_hint.assert_not_awaited()
 
 
 @pytest.mark.asyncio

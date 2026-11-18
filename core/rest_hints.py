@@ -176,18 +176,29 @@ async def update_hint_status(
         raise HTTPException(status_code=503, detail="ws_disconnected")
 
     hints = state.get_hints(slot)
-    hint = next((h for h in hints if h.location_id == location_id), None)
+    hint = next(
+        (
+            h for h in hints
+            if h.location_id == location_id and (body.findingPlayer is None or h.finding_player == body.findingPlayer)
+        ),
+        None,
+    )
     if hint is None:
         raise HTTPException(
             status_code=404,
-            detail=f"no hint for slot={slot} location_id={location_id}",
+            detail=f"no hint for slot={slot} location_id={location_id} finding_player={body.findingPlayer}",
         )
 
-    # AP only accepts UpdateHint from the hint's receiving/finding player, not from the main
-    # "Bridge" connection - so we send it over a connect-as-slot connection (like the paid self-hint),
-    # with ``player`` = the hint's receiving player. Without this the change never reaches AP's data
-    # storage and native clients (text launcher) don't see it.
-    ok = await ap_client.update_hint(slot, hint.receiving_player, location_id, body.status)
+    # AP lets only the hint's receiving player change its status (MultiServer: « UpdateHint: No Permission »),
+    # and would drop the packet silently from anyone else.
+    if hint.receiving_player != slot:
+        raise HTTPException(status_code=403, detail="only the receiving player may change a hint's status")
+
+    # AP only accepts UpdateHint from the hint's receiving player, not from the main "Bridge" connection - so we
+    # send it over a connect-as-slot connection (like the paid self-hint). AP finds the hint by (finding player,
+    # location): ``player`` in the packet is the world the location belongs to. Sending the receiving player there
+    # matched nothing for an item in another world, and could hit another hint of the slot's own world.
+    ok = await ap_client.update_hint(slot, hint.finding_player, location_id, body.status)
     if not ok:
         raise HTTPException(status_code=502, detail="ap_update_failed")
 
