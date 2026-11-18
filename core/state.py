@@ -169,7 +169,12 @@ class StateManager:
         """
         ps = self.ensure_slot(slot_index)
         for i, existing in enumerate(ps._hints):
-            if existing.location_id == hint.location_id and existing.item_id == hint.item_id:
+            # A location id (and an item id) is unique within one game only: the finding world tells two hints apart.
+            if (
+                existing.location_id == hint.location_id
+                and existing.item_id == hint.item_id
+                and existing.finding_player == hint.finding_player
+            ):
                 if existing != hint:
                     ps._hints[i] = hint
                     return True

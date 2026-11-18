@@ -586,7 +586,7 @@ class ArchipelagoClient:
             return None
 
     async def update_hint(
-        self, slot: int, receiving_player: int, location_id: int, status: int, *, timeout: float = 15.0
+        self, slot: int, finding_player: int, location_id: int, status: int, *, timeout: float = 15.0
     ) -> bool:
         """Connect AS ``slot`` and send an AP ``UpdateHint`` so the new status lands in the server's
         data storage (and reaches the player's real client / text launcher).
@@ -595,7 +595,8 @@ class ArchipelagoClient:
         connection is the TextOnly "Bridge" slot and has no such permission - sending UpdateHint
         there is silently ignored by the server. So, exactly like the paid self-hint (story 9.30),
         we open a throwaway connection AS ``slot`` (which is the receiving or finding player of the
-        hint shown on its page). ``player`` in the packet is the hint's receiving player. AP closes
+        hint shown on its page). ``player`` in the packet is the hint's finding player: AP looks a hint
+        up by (finding player, location) - ``Context.get_hint``. AP closes
         the socket cleanly, flushing the packet, so the change is persisted server-side.
         Best-effort: returns False on connect/transport failure.
         """
@@ -606,7 +607,7 @@ class ArchipelagoClient:
                 await self._connect_as_slot(ws, slot, timeout)
                 await ws.send(json.dumps([{
                     "cmd": "UpdateHint",
-                    "player": receiving_player,
+                    "player": finding_player,
                     "location": location_id,
                     "status": status,
                 }]))

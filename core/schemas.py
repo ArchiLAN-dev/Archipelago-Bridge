@@ -44,6 +44,9 @@ class HintItemRequest(BaseModel):
 
 class HintStatusUpdateRequest(BaseModel):
     status: int
+    # The world the hinted location belongs to. A location id is unique within one game only, so two worlds of
+    # the same game share them; without it the first hint at that id is taken (older callers).
+    findingPlayer: int | None = None
 
     @field_validator("status")
     @classmethod
