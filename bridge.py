@@ -17,6 +17,7 @@ from bridge.adapters.reachable_socket import ReachableSocketAdapter
 from bridge.core.ap_client import ArchipelagoClient, DataPackageStore
 from bridge.core.config import Config
 from bridge.core.domain import HintInfo, PlayerState
+from bridge.core.error_reporting import init_error_reporting
 from bridge.core.loops import (
     _apsave_reconcile_loop,
     _api_heartbeat_loop,
@@ -48,6 +49,7 @@ __all__ = [
 async def _main() -> None:
     config = Config.from_env()
     setup_logging(config.session_id)
+    init_error_reporting(config.session_id)
 
     log = logging.getLogger(__name__)
 
