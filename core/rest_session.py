@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from .ap_client import ArchipelagoClient
+from .commands import slot_acting_command
 from .deps import get_ap_client, require_auth
 from .reachable import _reachable_cache
 from .schemas import (
@@ -76,6 +77,9 @@ async def post_command(
 ) -> OkResponse:
     if not ap_client.ws_connected:
         raise HTTPException(status_code=503, detail="ws_disconnected")
+    # Story 9.56: the permanent connection is a real player's slot - never act on it from the console.
+    if slot_acting_command(body.command) is not None:
+        raise HTTPException(status_code=422, detail="slot_command_refused")
     if x_ap_admin_password:
         await ap_client.send_command(f"!admin login {x_ap_admin_password}")
     await ap_client.send_command(body.command)
