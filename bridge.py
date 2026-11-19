@@ -29,6 +29,7 @@ from bridge.core.loops import (
 from bridge.core.reachable import set_reachable_publisher
 from bridge.core.rest import create_app
 from bridge.core.save_parser import load_save_state
+from bridge.core.shutdown import run_until_server_stops
 from bridge.core.state import StateManager
 from bridge.core.ws_server import WsServer
 
@@ -121,7 +122,7 @@ async def _main() -> None:
     )
 
     try:
-        await ap_client.run_with_reconnect()
+        await run_until_server_stops(ap_client.run_with_reconnect(), _uv_task, uv_server)
     finally:
         uv_server.should_exit = True
         _uv_task.cancel()
