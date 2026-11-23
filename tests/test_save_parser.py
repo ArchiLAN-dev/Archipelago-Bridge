@@ -254,3 +254,14 @@ def test_an_unknown_net_utils_name_is_refused(tmp_path: Path) -> None:
     )
 
     assert load_save_state(save_dir) == {}
+
+
+def test_received_items_keep_their_flags(tmp_path: Path) -> None:
+    """Story 27.14: a NetworkItem is (item, location, player, flags); the flags of each item id are kept."""
+    items = [(500, 100, 2, 1), (501, 101, 3, 4), (500, 102, 4, 0), (502, 103, 5)]
+    data = {"location_checks": {(0, 6): {100}}, "received_items": {(0, 6, True): items}}
+
+    result = load_save_state(_write_apsave(tmp_path, data))
+
+    assert result[6]._received_items == [(500, 2, 100), (501, 3, 101), (500, 4, 102), (502, 5, 103)]
+    assert result[6].received_items_with_flags() == [[500, 2, 100, 1], [501, 3, 101, 4], [500, 4, 102, 1], [502, 5, 103, 0]]

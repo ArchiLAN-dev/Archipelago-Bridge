@@ -99,9 +99,10 @@ class StateManager:
         ps._checked_locations.update(locations)
         ps.checks_done = len(ps._checked_locations)
 
-    def add_item_received(self, slot_index: int, item_id: int, sender_slot: int, location_id: int) -> None:
+    def add_item_received(self, slot_index: int, item_id: int, sender_slot: int, location_id: int, flags: int = 0) -> None:
         ps = self.ensure_slot(slot_index)
         ps._received_items.append((item_id, sender_slot, location_id))
+        ps.record_received_flags(item_id, flags)
         ps.items_received = len(ps._received_items)
 
     def add_received_items(self, slot_index: int, count: int) -> None:
@@ -219,6 +220,8 @@ class StateManager:
             if saved_ps.items_received > ps.items_received:
                 ps._received_items = saved_ps._received_items
                 ps.items_received = saved_ps.items_received
+            for item_id, flags in saved_ps._received_flags.items():
+                ps.record_received_flags(item_id, flags)
             if saved_ps.client_status > ps.client_status:
                 ps.client_status = saved_ps.client_status
                 if saved_ps.client_status == 30 and ps.goal_reached_at is None:

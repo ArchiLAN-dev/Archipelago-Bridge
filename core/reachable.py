@@ -196,7 +196,7 @@ async def _compute_reachable(
         # A session daemon answers for every slot: each request names its own (story 17.28).
         "slot": slot,
         "checked_locations": list(ps._checked_locations) if ps else [],
-        "received_items": list(ps._received_items) if ps else [],
+        "received_items": ps.received_items_with_flags() if ps else [],
     })
 
     result, err = await _run_reachable(slot, state_payload, arch_files[0], yamls_dir, semaphore, log, runtime)
@@ -237,7 +237,7 @@ async def compute_reachable_with(
     state_payload = json.dumps({
         "slot": slot,
         "checked_locations": list(ps._checked_locations) if ps else [],
-        "received_items": (list(ps._received_items) if ps else []) + [list(i) for i in extra_items],
+        "received_items": (ps.received_items_with_flags() if ps else []) + [list(i) for i in extra_items],
     })
     return await _run_reachable(slot, state_payload, files[0], files[1], semaphore, log, runtime)
 

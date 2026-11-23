@@ -172,5 +172,6 @@ async def test_a_what_if_adds_the_item_and_never_touches_the_cache(monkeypatch: 
     result, err = await reachable.compute_reachable_with(1, [(102, 2, 402)], state, asyncio.Semaphore(1), logging.getLogger("t"))
 
     assert (result, err) == ({"counts": {"reachable_now": 7}}, "")
-    assert sent[0]["received_items"] == [[101, 2, 401], [102, 2, 402]]
+    # Story 27.14: the received items carry their flags; the what-if item has none to give.
+    assert sent[0]["received_items"] == [[101, 2, 401, 0], [102, 2, 402]]
     assert _reachable_cache == {}
