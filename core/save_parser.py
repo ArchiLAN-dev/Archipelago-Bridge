@@ -178,6 +178,10 @@ def load_save_state(save_dir: str) -> dict[int, PlayerState]:
                 )
                 for ni in raw_items
             ]
+            # Story 27.14: a NetworkItem is (item, location, player, flags).
+            for ni in raw_items:
+                flags = ni.flags if hasattr(ni, "flags") else (ni[3] if len(ni) > 3 else 0)
+                ps.record_received_flags(int(ni.item if hasattr(ni, "item") else ni[0]), int(flags or 0))
             ps.items_received = len(ps._received_items)
             ps.hints_used = int(hints_used_map.get(slot, 0))
             ps.hint_points_per_check = location_check_points

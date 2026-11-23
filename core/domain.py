@@ -76,6 +76,17 @@ class PlayerState:
     death_link_option: bool | None = None
     _checked_locations: set[int] = field(default_factory=set, repr=False)
     _received_items: list[tuple[int, int, int]] = field(default_factory=list, repr=False)
+    # Story 27.14: the AP flags (progression, useful, trap) of each received item id, OR-ed over every copy.
+    # Kept apart from the (item, player, location) tuples, which several readers unpack and compare as sets.
+    _received_flags: dict[int, int] = field(default_factory=dict, repr=False)
+
+    def record_received_flags(self, item_id: int, flags: int) -> None:
+        if flags:
+            self._received_flags[item_id] = self._received_flags.get(item_id, 0) | flags
+
+    def received_items_with_flags(self) -> list[list[int]]:
+        """The received items as [item, player, location, flags], the shape reachable.py reads."""
+        return [[item, player, location, self._received_flags.get(item, 0)] for item, player, location in self._received_items]
     _hints: list[HintInfo] = field(default_factory=list, repr=False)
 
     @property

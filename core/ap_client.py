@@ -1190,6 +1190,10 @@ class ArchipelagoClient:
                     (int(it.get("item", 0)), int(it.get("player", 0)), int(it.get("location", 0)))
                     for it in items if isinstance(it, dict)
                 ]
+                ps._received_flags = {}
+                for it in items:
+                    if isinstance(it, dict):
+                        ps.record_received_flags(int(it.get("item", 0)), int(it.get("flags", 0) or 0))
                 ps.items_received = len(ps._received_items)
                 self._recompute_event.set()
             elif items:
@@ -1200,6 +1204,7 @@ class ArchipelagoClient:
                             int(it.get("item", 0)),
                             int(it.get("player", 0)),
                             int(it.get("location", 0)),
+                            int(it.get("flags", 0) or 0),
                         )
                 self._recompute_event.set()
         for it in items:
